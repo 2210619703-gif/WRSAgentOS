@@ -29,6 +29,7 @@ include = ["wrs_agent*"]
 [tool.setuptools.package-data]
 "wrs_agent.nodes.asr" = ["assets.json"]
 "wrs_agent.nodes.tts" = ["assets.json"]
+"wrs_agent.nodes.ui" = ["static/*"]
 "wrs_agent.skills" = ["README.md", "*/SKILL.md"]
 
 [tool.pytest.ini_options]
