@@ -13,7 +13,7 @@ SESSION = "voice"
 # 独立相机模式：01/02/03 一起改回 "tcp/127.0.0.1:7449"、"wrs-demo"、"wrs"。
 
 # 选择 "realsense" 就会打开真实相机；"synthetic" 使用合成图像。
-BACKEND = "synthetic"
+BACKEND = "realsense"
 SERIAL = ""  # 留空使用默认相机，多台设备时可指定序列号。
 
 

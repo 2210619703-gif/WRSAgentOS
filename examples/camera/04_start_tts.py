@@ -8,7 +8,7 @@ from wrs_agent.nodes.serve import serve_node
 ENDPOINT = "tcp/127.0.0.1:7449"
 ENV_ID = "wrs-demo"
 SESSION = "wrs"
-BACKEND = "mock"  # 使用 "qwen" 时，先准备语音环境和本地模型，再用该环境的 Python 运行。
+BACKEND = "qwen"  # 使用 "qwen" 时，先准备语音环境和本地模型，再用该环境的 Python 运行。
 
 
 async def main():
