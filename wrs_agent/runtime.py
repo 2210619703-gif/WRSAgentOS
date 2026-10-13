@@ -185,6 +185,7 @@ class Runtime:
 
     def snapshot(self):
         actions = dict(self.execution.active_actions)
+        planning = self.goals.get(self.planning.request_id, {})
         return {
             "nodes": self.registry.snapshot() if self.registry else {},
             "task_id": self.task_id,
@@ -197,6 +198,7 @@ class Runtime:
             "error": self.execution.error.model_dump() if self.execution.error else None,
             "planning": self.planning.state,
             "planning_request_id": self.planning.request_id,
+            "planning_error": deepcopy(planning.get("error")),
             "planner_calls": self.planner_calls,
             "last_planning": dict(self.planning.timing),
             "queued": len(self.queued),

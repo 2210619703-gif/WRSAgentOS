@@ -5,6 +5,14 @@ from pydantic import ValidationError
 from wrs_agent.schemas import ErrorInfo
 
 _MESSAGES = {
+    "llm_invalid_reply": (
+        "模型返回的格式不符合所选协议；未创建任务。"
+        "请检查 LLM_PROTOCOL，并确认模型通过 propose_plan 返回单个完整计划。"
+    ),
+    "llm_unexpected_tool": (
+        "模型调用了未提供的工具；未创建任务。"
+        "模型只能调用 propose_plan，describe_objects、speak 等技能须写在 plan.steps 中。"
+    ),
     "llm_model_missing": (
         "请把 LLM_MODEL 设为账号上已开通的模型 ID；LLM_API_KEY 与 LLM_BASE_URL 不会选择模型。"
         "旧版 GLM_* 变量已改为 LLM_*，见 .env.example。使用 .env 时需让 IDE 运行配置加载该文件。"

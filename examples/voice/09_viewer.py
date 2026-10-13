@@ -278,7 +278,8 @@ if __name__ == "__main__":
             active = "、".join(overview["active_actions"])
             done = "；".join(f"{name}={state}" for name, state in overview["steps"].items())
             plan_panel.set_value("steps", f"执行中 {active}｜{done}" if active else done or "无")
-            plan_panel.set_value("fault", describe_fault(overview["error"]))
+            fault = overview.get("planning_error") if verdict == "FAILED" else None
+            plan_panel.set_value("fault", describe_fault(fault or overview["error"]))
             plan_panel.set_value(
                 "calls",
                 f"模型 {overview['planner_calls']} 次"
