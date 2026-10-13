@@ -317,7 +317,9 @@ if __name__ == "__main__":
         world.schedule_interval(show_progress, 0.3)
         try:
             # 这个帮助函数只管理页面服务，场景和刷新逻辑都在本文件。
-            with viewer_hub(VIEWER_PORT):
+            with viewer_hub(VIEWER_PORT, camera={
+                "endpoint": "tcp/127.0.0.1:7451", "env_id": "voice-goal",
+            }):
                 print(f"打开 http://127.0.0.1:{VIEWER_PORT}，Ctrl+C 退出观察。", flush=True)
                 print("按住“按住说话”说“向前移动”；说“停止”会立即走控制通道。", flush=True)
                 print("上一条未完成时说新目标，会先停下上一条再提交。", flush=True)

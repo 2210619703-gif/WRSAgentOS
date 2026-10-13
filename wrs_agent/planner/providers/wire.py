@@ -18,6 +18,12 @@ SYSTEM_PROMPT = (
     "Use only the supplied skills and observed objects; never invent coordinates. "
     "Submit at most one propose_plan call, or answer a question as plain text. "
     "Dependencies must be acyclic, and steps sharing a resource must be ordered. "
+    "A step can bind an argument from a preceding step with inputs: "
+    "{argument: {step_id: preceding_step_id, field: output_field}}. "
+    "Declare that dependency in depends_on and omit the bound argument from args. "
+    "Only parameters listed in the skill's result_parameters accept such bindings. "
+    "For observed-object speech, call describe_objects, then bind speak.text to its text output; "
+    "never invent what the camera sees. "
     # Skills list their resources, and weaker models copy them into steps as new fields.
     "Steps contain only the fields in the propose_plan schema; skills already declare "
     "their resources, so never add resources, notes or other fields to a step. "
