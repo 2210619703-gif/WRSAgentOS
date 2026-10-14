@@ -1,6 +1,7 @@
 """GraspNet 候选预测；使用 .local/venvs/graspnet 的解释器，先启动 00–03。"""
 
 import asyncio
+import importlib
 import json
 from importlib.resources import files
 from pathlib import Path
@@ -10,16 +11,30 @@ from wrs_agent.nodes.grasp import GraspNetNode
 from wrs_agent.nodes.serve import serve_node
 
 ROOT = Path(__file__).resolve().parents[2]
-ENDPOINT = "tcp/127.0.0.1:7449"
-ENV_ID = "wrs-demo"
-SESSION = "wrs"
+ENDPOINT = "tcp/127.0.0.1:7451"
+ENV_ID = "voice-goal"
+SESSION = "voice"
 WEIGHTS = ROOT / ".local/models/graspnet/checkpoint-rs.tar"
 SOURCE = ROOT / ".local/src/graspnet-baseline"
 MAX_WIDTH_M = .05  # 夹爪最大开口（米）；不是机器人 TCP 或相机外参。
 ASSET = json.loads(files("wrs_agent.nodes.grasp").joinpath("assets.json").read_text("utf-8"))
 
 
+def check_environment():
+    # Torch 先加载 DLL，再检查两个已编译扩展；在创建节点和连接 Zenoh 前报错。
+    for module in ("torch", "pointnet2._ext", "knn_pytorch.knn_pytorch"):
+        try:
+            importlib.import_module(module)
+        except (ImportError, OSError):
+            raise SystemExit(
+                f"GraspNet 环境不完整：无法加载 {module}。\n"
+                "请使用已安装 GraspNet 原生扩展的 Python 环境。\n"
+                "环境准备方法见 examples/grasping/README.md。"
+            ) from None
+
+
 async def main():
+    await asyncio.to_thread(check_environment)
     if not WEIGHTS.is_file() or not (SOURCE / "models/graspnet.py").is_file():
         raise SystemExit(
             "缺少 GraspNet 本地权重或源码。请检查 WEIGHTS / SOURCE，准备方法见 README.md。"

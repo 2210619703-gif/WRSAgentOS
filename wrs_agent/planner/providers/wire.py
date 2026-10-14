@@ -39,8 +39,14 @@ PLAN_INSTRUCTIONS = (
     "{argument: {step_id: preceding_step_id, field: output_field}}. "
     "Declare that dependency in depends_on and omit the bound argument from args. "
     "Only parameters listed in the skill's result_parameters accept such bindings. "
+    "The referenced field must exist in the source skill's output schema and match the "
+    "target parameter type; output=null means there are no bindable outputs. "
     "Questions about currently visible objects require a fresh observation; never invent "
     "what the camera sees from a snapshot count. "
+    "Robot observe only refreshes environment state; it is not camera object detection "
+    "and has no text output. An empty environment objects map is not evidence of an empty "
+    "camera view. If visual skills are unavailable, explain that limitation instead of "
+    "claiming that no objects are visible. "
     + VISUAL_PLAN_INSTRUCTIONS +
     # Skills list their resources, and weaker models copy them into steps as new fields.
     "Steps contain only the fields in the decision schema; skills already declare "
@@ -184,7 +190,8 @@ def inline_schema(schema: dict) -> dict:
             return node
         if "$ref" in node:
             return inline(defs[node["$ref"].rsplit("/", 1)[-1]])
-        return {key: inline(value) for key, value in node.items()}
+        # Local semantic annotations are not part of a provider's strict JSON Schema.
+        return {key: inline(value) for key, value in node.items() if key != "x-wrs-artifact"}
 
     return inline(schema)
 

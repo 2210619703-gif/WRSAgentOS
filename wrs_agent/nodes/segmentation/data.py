@@ -46,6 +46,15 @@ class SegmentInfo(Boundary):
         return self
 
 
+class LatestSegment(Boundary):
+    """Read-only reference; reading the artifact still checks owner, state and age."""
+
+    segment_id: Name
+    task_id: Name
+    observation_id: Name
+    age_s: float = Field(ge=0)
+
+
 @dataclass(frozen=True)
 class SegmentData:
     info: SegmentInfo

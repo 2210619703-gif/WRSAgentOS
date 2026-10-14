@@ -47,13 +47,29 @@ Router 配置复用 [camera/router.json5](../camera/router.json5)。
 这里的 `-m`、`-X` 是解释器选项，例子本身不解析参数。IDE 选择表中的解释器后直接运行。
 独立模型环境都由固定基础 Python 创建；不要用 `scripts/run.py` 覆盖它们的模型依赖。
 
+GraspNet 的 `pointnet2._ext` 和 `knn_pytorch.knn_pytorch` 是编译扩展，安装在
+`.local/venvs/graspnet`，共享解释器中有 Torch 也不表示有这两个扩展。PyCharm 的
+`04_start_graspnet` 运行配置需单独选择该环境的 `Scripts/python.exe`，不要继承
+项目的共享解释器。脚本会在创建节点前检查扩展，缺失或 DLL 加载失败时显示通用
+环境提示和文档入口，不输出本机绝对路径。已有环境正常时不需要重新安装或编译；
+只有该环境本身缺扩展时
+才运行 `scripts/setup_graspnet.ps1 -BuildExtensions`，准备步骤见下方文档。
+
 ## 结果与准备
 
 06 提交 `locate_object → segment_region → infer_grasps`，通过 `Step.inputs` 传递
 本次任务的数据编号。RGB、深度、点云和分割始终绑定同一观测。它检查 RealSense
 观测和节点就绪状态；失败时显示原因，不回退到合成相机或上一轮结果。
 成功时显示候选数量、观测编号/年龄、相机坐标系、首选位置和开口。
+GraspNet 从完整有效场景点云采样 20,000 点推理，再用同帧分割 ROI 筛选目标候选，
+最后检查开口并排序；ROI 内无候选时明确失败，不使用旁边物体的抓取代替。
 模型质量分数不是成功概率，候选尚未做真实场景碰撞检查。
+
+ROI 无候选时，故障信息会列出“ROI采样点 / ROI种子 / 场景候选 / ROI候选”。
+`grasp_roi_not_sampled` 表示目标在全景采样时未被保留；`grasp_roi_no_seed` 表示已有
+目标输入点，但模型的抓取种子未覆盖它；`grasp_roi_rejected_as_background` 表示目标
+种子被模型判为背景。分割成功不保证 GraspNet 一定生成候选，不应把这三种情况统一
+解释为掩码或坐标系错误。更新诊断后需重启 04，旧失败日志不会被重写。
 
 本机已准备权重和两套模型环境，启动入口不会下载或安装。新机器的环境/模型准备
 步骤、固定资产哈希与许可见 [VISUAL_GRASP.md](../../docs/VISUAL_GRASP.md)。

@@ -7,7 +7,7 @@ import time
 import numpy as np
 
 from wrs_agent.nodes.grasp import GraspNetNode
-from wrs_agent.nodes.grasp.graspnet import candidates_from_rows, sample_target
+from wrs_agent.nodes.grasp.graspnet import candidates_from_rows
 from wrs_agent.nodes.segmentation import Sam3Node
 from wrs_agent.nodes.serve import serve_node
 
@@ -37,7 +37,10 @@ class FixtureGrasp:
     name, sha256, revision = "offline-grasp-fixture", "0" * 64, "0" * 40
 
     def infer(self, points, mask):
-        center = sample_target(points, mask).mean(axis=0)
+        valid = mask & np.isfinite(points).all(axis=2) & (points[:, :, 2] > 0)
+        if np.count_nonzero(valid) < 64:
+            raise ValueError("insufficient_target_depth")
+        center = points[valid].mean(axis=0)
         row = np.array([.9, .04, .02, .03, *np.eye(3).reshape(-1), *center, -1.])
         return candidates_from_rows(row[None], max_width_m=.05)
 

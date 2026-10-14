@@ -8,6 +8,44 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 
+@pytest.mark.parametrize("missing,error", [
+    ("torch", ModuleNotFoundError),
+    ("pointnet2._ext", ModuleNotFoundError),
+    ("knn_pytorch.knn_pytorch", OSError),
+])
+async def test_missing_graspnet_extension_exits_before_token_or_node(monkeypatch, missing, error):
+    main = runpy.run_path("examples/grasping/04_start_graspnet.py")["main"]
+
+    def load(name):
+        if name == missing:
+            raise error("native loader details")
+        return SimpleNamespace()
+
+    token, serve = Mock(), AsyncMock()
+    monkeypatch.setitem(main.__globals__, "importlib", SimpleNamespace(import_module=load))
+    monkeypatch.setitem(main.__globals__, "use_local_token", token)
+    monkeypatch.setitem(main.__globals__, "serve_node", serve)
+    with pytest.raises(SystemExit) as caught:
+        await main()
+    message = str(caught.value)
+    assert missing in message and "GraspNet 原生扩展" in message
+    assert "examples/grasping/README.md" in message
+    assert str(main.__globals__["ROOT"]) not in message
+    assert "当前解释器" not in message and "python.exe" not in message
+    assert "native loader details" not in message
+    token.assert_not_called()
+    serve.assert_not_awaited()
+
+
+def test_graspnet_extensions_are_loaded_after_torch(monkeypatch):
+    check = runpy.run_path("examples/grasping/04_start_graspnet.py")["check_environment"]
+    loaded = []
+    monkeypatch.setitem(check.__globals__, "importlib",
+                        SimpleNamespace(import_module=loaded.append))
+    check()
+    assert loaded == ["torch", "pointnet2._ext", "knn_pytorch.knn_pytorch"]
+
+
 @pytest.fixture
 def example(monkeypatch):
     main = runpy.run_path("examples/grasping/06_propose_grasps.py")["main"]

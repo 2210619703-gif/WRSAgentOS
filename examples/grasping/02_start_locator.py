@@ -10,9 +10,9 @@ from wrs_agent.nodes.serve import serve_node
 from wrs_agent.nodes.vision import YoloNode
 
 ROOT = Path(__file__).resolve().parents[2]
-ENDPOINT = "tcp/127.0.0.1:7449"
-ENV_ID = "wrs-demo"
-SESSION = "wrs"
+ENDPOINT = "tcp/127.0.0.1:7451"
+ENV_ID = "voice-goal"
+SESSION = "voice"
 WEIGHTS = ROOT / ".local/models/yolo/yolov8m-worldv2.pt"
 CLIP_WEIGHTS = ROOT / ".local/models/fastsam/ViT-B-32.pt"
 DEVICE = "0"

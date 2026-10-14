@@ -10,9 +10,9 @@ from wrs_agent.nodes.segmentation import SegmentationNode
 from wrs_agent.nodes.serve import serve_node
 
 ROOT = Path(__file__).resolve().parents[2]
-ENDPOINT = "tcp/127.0.0.1:7449"
-ENV_ID = "wrs-demo"
-SESSION = "wrs"
+ENDPOINT = "tcp/127.0.0.1:7451"
+ENV_ID = "voice-goal"
+SESSION = "voice"
 WEIGHTS = ROOT / ".local/models/fastsam/FastSAM-x.pt"
 DEVICE = "cuda"
 CONFIDENCE = .4

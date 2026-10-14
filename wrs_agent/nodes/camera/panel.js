@@ -29,6 +29,7 @@ panel.innerHTML = `
   <nav aria-label="观测类型">
     <button data-view="rgb" aria-pressed="true">RGB</button>
     <button data-view="depth" aria-pressed="false">深度</button>
+    <button data-view="segmentation" aria-pressed="false">分割</button>
     <button data-view="points" aria-pressed="false">点云</button>
   </nav>
   <div class="scene-controls" hidden>
@@ -49,6 +50,15 @@ let current = null, selected = "rgb", graspMode = false;
 let previousFrame = null, paintedFrame = null, received = 0, fps = 0, began = performance.now();
 const states = {connecting:"连接中", offline:"节点未连接", disconnected:"相机未连接",
   stale:"观测已过期", unavailable:"观测不可用"};
+const graspStates = {
+  artifact_expired:["抓取结果已过期", "候选及同帧点云按采集时间保留 30 秒，或被新结果替换。请重新生成后查看。"],
+  artifact_invalidated:["抓取结果已失效", "任务被取消、控制状态变化或节点重启，旧候选已清除。"],
+  grasp_not_available:["尚无抓取结果", "完成一次 infer_grasps 后可查看；查看不会触发推理。"],
+  grasp_changed:["抓取结果正在更新", "正在获取新候选，旧候选已清除。"],
+  camera_preview_stale:["抓取预览已过期", "结果超过有效期或预览查询中断，正在重新查询。"],
+  invalid_grasp_preview:["抓取数据无法显示", "候选数据或观测对应关系不正确，请检查节点日志。"],
+  grasp_node_unavailable:["抓取节点未连接", "请检查 GraspNet 节点及通信连接。"],
+};
 const requestedView = () => selected === "points" && graspMode ? "grasps" : selected;
 function render() {
   const ready = current?.state === "ready" && current.view === requestedView();
@@ -64,12 +74,27 @@ function render() {
     detail.textContent = current?.state === "offline" ? "请启动相机节点。"
       : current?.state === "disconnected" ? "请检查相机连接及节点配置。" : "等待有效观测。";
     const target = current?.connection;
+    if (selected === "segmentation") {
+      status.textContent = current?.state === "offline" ? "分割节点未连接" : "暂无有效分割结果";
+      empty.textContent = status.textContent;
+      detail.textContent = "完成一次分割任务后可查看；查看不会触发推理。";
+      hint.textContent = `绿色：选中的掩码；橙框：YOLO 定位框。`
+        + (current?.reason ? ` 当前状态：${current.reason}。` : "")
+        + "分割失败请查看“规划与执行”的故障详情。";
+      return;
+    }
     if (selected === "points" && graspMode) {
-      status.textContent = current?.state === "offline" ? "抓取节点未连接" : "暂无有效抓取候选";
-      detail.textContent = "完成一次 infer_grasps 后可查看；查看不会触发推理。";
-      hint.textContent = target
-        ? `查询 ${target.endpoint} · ${target.env_id}/${current.grasp_node_id}。结果过期或取消后清除。`
-        : "等待 GraspNet 结果。";
+      const state = graspStates[current?.reason] || (current?.state === "connecting" || !current
+        ? ["正在查询抓取结果", "查看不会触发推理。"]
+        : current?.state === "offline" ? graspStates.grasp_node_unavailable
+        : ["抓取结果暂不可用", "请核对下方原因；任务成功数量可在“规划与执行 → 结果”查看。"]);
+      status.textContent = state[0];
+      empty.textContent = state[0];
+      detail.textContent = state[1];
+      hint.textContent = (target
+        ? `查询 ${target.endpoint} · ${target.env_id}/${current.grasp_node_id}。`
+        : "等待 GraspNet 结果。") + (current?.reason ? `原因：${current.reason}。` : "")
+        + "生成数量见“规划与执行 → 结果”；结果数量不代表当前仍可读取。";
       note.textContent = status.textContent;
       return;
     }
@@ -85,7 +110,13 @@ function render() {
   detail.textContent = `${current.width} × ${current.height} · ${current.frame_id}`;
   hint.textContent = selected === "points" ? "相机坐标系（米），未标定；展示位置不代表与机器人对齐。"
     : selected === "depth" ? "深度颜色范围 0–0.6 m；黑色表示无有效深度。" : "与深度、点云来自同一观测。";
-  const key = `${selected}/${current.observation_id}`;
+  const key = `${selected}/${current.segment_id || current.observation_id}`;
+  if (selected === "segmentation") {
+    status.textContent = `${source} · 分割快照`;
+    detail.textContent = `${current.target} · ${current.pixel_count} 个像素 · ${current.age_s.toFixed(1)} 秒前`;
+    hint.textContent = "绿色：选中掩码；橙框：YOLO 定位。与 RGB/深度/点云属于同一观测。"
+      + "结果过期、取消或开始新分割后清除。";
+  }
   if (selected === "points") {
     img.removeAttribute("src");
     try {
@@ -94,9 +125,10 @@ function render() {
     } catch {scene.clear();note.textContent="主场景绘制失败，请刷新页面。";}
     if (graspMode) {
       detail.textContent = `${current.target} · 显示 ${current.grasps.length}/${current.grasp_count} 个候选`
-        + ` · 推理帧 ${current.age_s.toFixed(1)} 秒前`;
-      hint.textContent = "绿：最高模型分数；橙：其他候选。夹爪为示意，未做碰撞检查。"
-        + "点云与抓姿属于同一观测；相机展示区未标定到机器人。";
+        + ` · 目标 ${current.segmented_point_count} 点 · 推理帧 ${current.age_s.toFixed(1)} 秒前`
+        + (Number.isFinite(current.valid_for_s) ? ` · 有效期约剩 ${current.valid_for_s.toFixed(0)} 秒` : "");
+      hint.textContent = "粉紫：分割目标；原色：同帧背景。绿：最高分抓姿；橙：其他候选。"
+        + "夹爪为示意，未做碰撞检查；相机展示区未标定到机器人。";
     }
     return;
   }

@@ -1,24 +1,48 @@
+import asyncio
+import importlib
+import json
+import sqlite3
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
 from conftest import action, eventually
+from test_runtime import OfflineNode
 
 from wrs_agent.drivers.cameras.synthetic import SyntheticCamera
 from wrs_agent.errors import AgentError
 from wrs_agent.executor import ActionExecutor
 from wrs_agent.nodes.camera.frames import Observation
 from wrs_agent.nodes.grasp.data import GraspData, GraspSet, LatestGrasps, pack_grasps, unpack_grasps
-from wrs_agent.nodes.grasp.graspnet import candidates_from_rows, sample_target
-from wrs_agent.nodes.grasp.node import GraspNetNode
+from wrs_agent.nodes.grasp.graspnet import GraspNetPredictor, candidates_from_rows
+from wrs_agent.nodes.grasp.node import GraspNetNode, GraspState
 from wrs_agent.nodes.segmentation.data import SegmentData, SegmentInfo, pack_segment, unpack_segment
 from wrs_agent.nodes.segmentation.node import SegmentationState
 from wrs_agent.nodes.segmentation.sam3 import Sam3Segmenter, select_mask
 from wrs_agent.nodes.vision.artifacts import ArtifactCache, ArtifactOwner, ArtifactRequest
-from wrs_agent.schemas import ActionState
-from wrs_agent.skills.vision.grasping import SEGMENT, SegmentOutput
+from wrs_agent.runtime import Runtime
+from wrs_agent.schemas import ActionState, Plan, Step, TaskRequest, new_id
+from wrs_agent.skills.vision.grasping import INFER_GRASPS, SEGMENT, SegmentOutput
+
+
+def roi_failure(stage):
+    from wrs_agent.nodes.grasp.graspnet import target_rows
+
+    cloud = np.array([[0, 0, .3], [.1, 0, .3]], dtype=np.float32)
+    roi = np.array([stage != "sample", False])
+    indices = np.array([1] if stage == "seed" else [0, 1])
+    objectness = np.array([True] if stage == "seed" else [False, True])
+    decoded = np.tile([.9, .04, .02, .03, *np.eye(3).ravel(), 0, 0, 0, -1.],
+                      (int(objectness.sum()), 1))
+    decoded[:, 13:16] = cloud[indices[objectness]]
+    try:
+        target_rows(decoded, cloud, roi, indices, objectness)
+    except AgentError as exc:
+        return exc
+    raise AssertionError("Expected an empty ROI error")
 
 
 @pytest.fixture
@@ -122,12 +146,7 @@ def test_target_ambiguity_and_explicit_spatial_selection():
         select_mask(np.empty((0, 4)), np.array([]), "only")
 
 
-def test_graspnet_samples_only_finite_target_xyz_and_checks_gripper_width(segment):
-    cloud = sample_target(segment.arrays["points"], segment.mask, count=1000)
-    assert cloud.shape == (1000, 3) and cloud.dtype == np.float32
-    np.testing.assert_allclose(cloud[:, 2], .25)
-    with pytest.raises(ValueError, match="insufficient_target_depth"):
-        sample_target(segment.arrays["points"], np.zeros_like(segment.mask))
+def test_graspnet_checks_gripper_width_and_rotation():
     assert candidates_from_rows(rows(), max_width_m=.05)[0].width_m == .04
     with pytest.raises(ValueError, match="no_grasp"):
         candidates_from_rows(rows(), max_width_m=.03)
@@ -207,7 +226,7 @@ async def test_grasp_preview_uses_inference_frame_once_then_checks_validity(
     assert time.monotonic() - ui.observed_at["grasps"] >= 6
     await ui._update("grasps")
     read.assert_awaited_once_with(ui.grasp_bus, "grasps", "task")
-    assert ui.grasp_bus.request.await_count == 2
+    assert ui.grasp_bus.request.await_count == 3  # New data is rechecked after encoding.
     ui.client.read.assert_not_awaited()
     ui.grasp_bus.request.side_effect = AgentError("artifact_invalidated")
     await ui._update("grasps")
@@ -259,3 +278,94 @@ async def test_artifact_identity_comes_from_accepted_action(tmp_path):
         assert executor.records[request.action_id][0]["args"]["target"] == "box"
     finally:
         await executor.close()
+
+
+@pytest.mark.parametrize("where,failure,code,source", [
+    ("connect", AgentError("node_unavailable"), "segmentation_unavailable", "segmentation"),
+    ("read", AgentError("request_timeout"), "segmentation_unavailable", "segmentation"),
+    ("read", TimeoutError("private-path"), "segmentation_unavailable", "segmentation"),
+    ("read", AgentError("artifact_task_mismatch"), "artifact_task_mismatch", "graspnet"),
+    ("infer", ValueError("insufficient_target_depth"), "insufficient_target_depth", "graspnet"),
+    ("infer", ValueError("no_grasp_in_target_roi"), "no_grasp_in_target_roi", "graspnet"),
+    ("infer", roi_failure("sample"), "grasp_roi_not_sampled", "graspnet"),
+    ("infer", roi_failure("seed"), "grasp_roi_no_seed", "graspnet"),
+    ("infer", roi_failure("objectness"), "grasp_roi_rejected_as_background", "graspnet"),
+    ("infer", ValueError("no_grasp_within_gripper_width"),
+     "no_grasp_within_gripper_width", "graspnet"),
+    ("infer", ValueError("grasp_gpu_out_of_memory"), "grasp_gpu_out_of_memory", "graspnet"),
+    ("infer", ValueError("private-path"), "invalid_graspnet_output", "graspnet"),
+    ("infer", RuntimeError("private-path"), "grasp_inference_failed", "graspnet"),
+])
+async def test_grasp_failure_reaches_runtime_journal_and_viewer(
+    tmp_path, monkeypatch, segment, where, failure, code, source,
+):
+    # Exercise the real node handler and Action lifecycle without hardware or model calls.
+    from wrs_agent.nodes.grasp import node as grasp_module
+
+    node = object.__new__(GraspNetNode)
+    node.options = SimpleNamespace(segmentation="segmentation")
+    node.registry = SimpleNamespace(refresh=AsyncMock())
+    node.connect = Mock(side_effect=failure if where == "connect" else None)
+    node.loop, node.worker, node.cache = asyncio.get_running_loop(), None, ArtifactCache()
+    node.cache.put("previous", segment.info.owner, segment, nbytes=segment.nbytes,
+                   observed_at=time.monotonic())
+    node.predictor = SimpleNamespace(infer=Mock(side_effect=failure))
+    read = AsyncMock(return_value=(segment, 0), side_effect=failure if where == "read" else None)
+    monkeypatch.setattr(grasp_module, "read_segment", read)
+    journal = tmp_path / "graspnet.sqlite3"
+    executor = ActionExecutor(journal, state=GraspState(),
+                              skills=(INFER_GRASPS.bind(node.infer),), backend="fixture",
+                              features_extra={"robot_controls": False})
+    node.executor, executor.node_id = executor, "graspnet"
+    runtime = Runtime({"graspnet": OfflineNode(executor)}, {"infer_grasps": "graspnet"})
+    try:
+        task = await runtime.start(TaskRequest(request_id=new_id(), plan=Plan(steps=[
+            Step(step_id="infer", skill="infer_grasps", args={"segment_id": "segment"}),
+        ])))
+        result = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
+        await executor.runner  # Wait for the final journal write, too.
+        error = result["error"]
+        assert error["code"] == code and error["node_id"] == source
+        if code.startswith("grasp_roi_"):
+            assert error["message"] == failure.error.message and "ROI种子" in error["message"]
+        assert error["task_id"] == task["task_id"] and error["action_id"]
+        assert "private-path" not in json.dumps(result)
+        assert node.latest_request is None and not node.cache.entries
+        assert node.cache.nbytes == 0  # Even a failed replacement releases the previous frame.
+        assert node.predictor.infer.call_count == int(where == "infer")
+        if where == "connect":
+            assert error["stage"] == "discovery"
+            read.assert_not_awaited()
+        else:
+            assert error["stage"] == "observe"
+        rendered = importlib.import_module("examples.voice.09_viewer").describe_fault(error)
+        assert error["code"] in rendered and error["message"] in rendered
+        assert source in rendered and "private-path" not in rendered
+        with sqlite3.connect(journal) as db:
+            saved = json.loads(db.execute("SELECT status FROM actions").fetchone()[0])
+        assert saved["error"] == error and saved["reason"] == code
+        assert saved["output"] == {} and "private-path" not in json.dumps(saved)
+    finally:
+        await runtime.close()
+        await executor.close()
+
+
+def test_cuda_oom_becomes_a_safe_reason_without_gpu_or_plotting(segment):
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    predictor = object.__new__(GraspNetPredictor)
+    predictor.torch = SimpleNamespace(
+        cuda=SimpleNamespace(OutOfMemoryError=OutOfMemoryError),
+        inference_mode=nullcontext,
+        from_numpy=Mock(side_effect=OutOfMemoryError("private GPU details")),
+    )
+    with pytest.raises(ValueError, match="^grasp_gpu_out_of_memory$"):
+        predictor.infer(segment.arrays["points"], segment.mask)
+
+
+def test_viewer_renders_empty_and_legacy_errors():
+    describe = importlib.import_module("examples.voice.09_viewer").describe_fault
+    assert describe(None) == "（无）"
+    assert describe({"code": "old_code"}) == "old_code"
+    assert describe({"code": "old_code", "message": "old_code"}) == "old_code"

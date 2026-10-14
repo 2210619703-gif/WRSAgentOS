@@ -1,11 +1,17 @@
 """Task contracts for visual grasp preparation. No model SDK or transport imports."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field
 
 from wrs_agent.schemas import Boundary, Name
 from wrs_agent.skills.contracts import Skill
+
+# IDs share a wire representation, but refer to different artifacts. Runtime checks
+# this schema annotation before dispatch; an observation/location is not a mask.
+LocationId = Annotated[Name, Field(json_schema_extra={"x-wrs-artifact": "location"})]
+SegmentId = Annotated[Name, Field(json_schema_extra={"x-wrs-artifact": "segment"})]
+GraspSetId = Annotated[Name, Field(json_schema_extra={"x-wrs-artifact": "grasp_set"})]
 
 
 class SegmentArgs(Boundary):
@@ -14,7 +20,7 @@ class SegmentArgs(Boundary):
 
 
 class SegmentOutput(Boundary):
-    segment_id: Name
+    segment_id: SegmentId
     observation_id: Name
 
 
@@ -24,26 +30,26 @@ class LocateArgs(Boundary):
 
 
 class LocationOutput(Boundary):
-    location_id: Name
+    location_id: LocationId
     observation_id: Name
 
 
 class RegionArgs(Boundary):
-    location_id: Name
+    location_id: LocationId
 
 
 class InferGraspsArgs(Boundary):
-    segment_id: Name
+    segment_id: SegmentId
 
 
 class GraspsOutput(Boundary):
-    candidate_set_id: Name
+    candidate_set_id: GraspSetId
     observation_id: Name
     count: int = Field(ge=1, le=32)
 
 
 class ExecuteGraspArgs(Boundary):
-    candidate_set_id: Name
+    candidate_set_id: GraspSetId
 
 
 class GraspOutput(Boundary):
@@ -88,6 +94,8 @@ INFER_GRASPS = Skill(
     result_parameters=("segment_id",), resources=("grasp_inference",), timeout=30,
     description="Propose grasp poses from the selected object's same-frame XYZ.",
     instructions="Bind segment_id to segment_object or segment_region output in the same task. "
+                 "Consume the returned candidate_set_id before calling infer_grasps again; "
+                 "starting a new inference discards the previous candidate set. "
                  "Candidates are proposals, not a successful grasp or a motion authorization. "
                  "Execution requires Environment calibration, collision and freshness checks.",
     verification="candidates_bound_to_segment_and_observation",

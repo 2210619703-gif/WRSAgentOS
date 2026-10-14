@@ -5,6 +5,53 @@ from pydantic import ValidationError
 from wrs_agent.schemas import ErrorInfo
 
 _MESSAGES = {
+    "segmentation_source_timeout": (
+        "分割尚未开始：连接或读取上游图像/定位数据超时。请检查故障所示节点是否可达及其负载。"
+    ),
+    "segmentation_inference_failed": "分割推理未完成，请检查模型环境和 GPU 状态。",
+    "segmentation_gpu_out_of_memory": "分割推理时 GPU 显存不足，请减少其他模型的显存占用。",
+    "invalid_segmentation_output": "分割结果格式或数值无效，不能生成目标掩码。",
+    "segmentation_grid_mismatch": "分割掩码尺寸与原始 RGB 不一致，不能匹配深度和点云。",
+    "region_mask_not_found": "FastSAM 未找到与 YOLO 定位框充分重合的掩码，请检查定位框和画面。",
+    "region_mask_ambiguous": "多个分割掩码与定位框匹配程度接近，无法唯一确定目标。",
+    "target_not_found": "当前画面未找到满足条件的目标。",
+    "target_ambiguous": "当前画面有多个符合条件的目标，请明确目标或指定方位。",
+    "too_many_segment_candidates": "分割候选数量达到上限，请减少画面杂物或调整视野。",
+    "camera_stale": "相机观测已过期，请检查相机采集是否持续更新。",
+    "segment_not_available": "暂无有效分割结果，请先完成一次分割任务。",
+    "segment_changed": "分割结果已变化，请读取最新结果。",
+    "artifact_type_mismatch": (
+        "步骤引用的结果种类不匹配。抓姿预测需要分割结果 segment_id；"
+        "请先定位、再分割，不能用 location_id 或 observation_id 代替分割结果。"
+    ),
+    "segmentation_unavailable": (
+        "GraspNet 无法读取分割结果：分割节点未就绪或不可达。"
+        "请启动 FastSAM，并确认节点连接同一环境；修改配置后需重启节点。"
+    ),
+    "observation_stale": "观测已过期，请重新进行定位和分割后再预测抓姿。",
+    "artifact_expired": "本次任务的数据已过期或被清除，请重新执行完整感知流程。",
+    "artifact_task_mismatch": "结果属于另一任务，不能用于本次推理。",
+    "artifact_invalidated": "结果因取消、节点重启或动作状态变化而失效。",
+    "insufficient_target_depth": (
+        "分割区域内有效三维点少于 64 个，无法预测抓姿。"
+        "请检查目标深度、相机距离及掩码与点云是否对齐。"
+    ),
+    "no_grasp_within_gripper_width": "没有符合当前夹爪最大开口的有效抓取候选。",
+    "invalid_graspnet_output": "GraspNet 返回的抓姿数据不符合预期格式或含无效数值。",
+    "no_grasp_in_target_roi": (
+        "GraspNet 已完成场景推理，但分割目标区域内没有抓取候选。请检查目标分割和有效深度。"
+    ),
+    "grasp_roi_not_sampled": (
+        "全场景降采样没有保留目标区域的点，尚不能判断该目标的抓取候选。"
+    ),
+    "grasp_roi_no_seed": (
+        "输入包含目标点，但 GraspNet 选取的抓取种子没有覆盖目标区域。"
+    ),
+    "grasp_roi_rejected_as_background": (
+        "目标区域有抓取种子，但模型的物体/背景判定将它们全部判为背景，解码未保留目标候选。"
+    ),
+    "grasp_inference_failed": "GraspNet 推理未完成，请检查模型环境和 GPU 状态。",
+    "grasp_gpu_out_of_memory": "GraspNet 推理时 GPU 显存不足，请减少其他模型的显存占用。",
     "llm_invalid_reply": (
         "模型返回的格式不符合所选协议；未创建任务。"
         "请检查 LLM_PROTOCOL 和 LLM_OUTPUT_MODE，确认回复符合所选返回格式。"
@@ -123,6 +170,11 @@ _MESSAGES = {
 
 def error_info(code, **context):
     return ErrorInfo(code=code, message=_MESSAGES.get(code, code.replace("_", " ")), **context)
+
+
+def known_error_info(code):
+    """Only reviewed codes may turn an exception string into a public explanation."""
+    return error_info(code) if code in _MESSAGES else None
 
 
 class AgentError(ValueError):

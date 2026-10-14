@@ -1,5 +1,10 @@
 # 依赖与 Git submodule 决策
 
+2026-10-14 GraspNet 启动排查：共享 Python 具备 Torch 2.9.0+cu128，但未安装
+wrs-graspnet-extensions；项目隔离环境已有 0.1.0 的 pointnet2/KNN 扩展、相同 Torch、
+NumPy 2.5.3。实际加载权重并对已保存点云推理通过。本轮复用已有环境，不安装、编译、
+下载或调整依赖及锁文件；本机 IDE 解释器选择仅写入被忽略的 .idea 配置。
+
 2026-10-14 模型示例配置：llm extra 与 dev 增加 `python-dotenv>=1.1,<2`，仅用于
 models/01、02 启动入口加载根目录 .env。uv 0.12.15 实际解析 153 包，新增锁定
 python-dotenv 1.2.4（BSD-3-Clause），已有包版本未改变。按 uv 导出的官方 SHA256

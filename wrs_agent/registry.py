@@ -14,6 +14,29 @@ from wrs_agent.transport import Transport
 MAX_NODE_RECORDS = 64
 MAX_PRESENCE = 1024
 MAX_SKILL_OWNERS = MAX_NODE_RECORDS * 64
+PRESENCE_REFRESH_SECONDS = 2.0
+
+
+def _update_presence(presence, name, address, present):
+    """Apply one bounded presence change; return whether information was lost."""
+    if present:
+        if name not in presence:
+            if len(presence) >= MAX_PRESENCE:
+                return True
+            presence[name] = set()
+        live = presence[name]
+        if live is not None:
+            live.add(address)
+            if len(live) > 16:
+                presence[name] = None
+                return True
+    elif name in presence:
+        live = presence[name]
+        if live is not None:
+            live.discard(address)
+            if not live:
+                del presence[name]
+    return False
 
 
 def discovery_prefix(bus, env_id):
@@ -71,6 +94,9 @@ class NodeRegistry:
         self._overflow = self._closed = self._notified = False
         self._touched = set()
         self._initialized = False
+        self._last_presence = float("-inf")
+        self._queried = None
+        self._query_overflow = False
         self._initial_lock = asyncio.Lock()
         self._refresh_lock = asyncio.Lock()
         self._changed = asyncio.Event()
@@ -88,7 +114,7 @@ class NodeRegistry:
             self._notified = False
         self._changed.set()
 
-    def _change(self, sample, *, historical=False):
+    def _change(self, sample, *, historical=False, query=None):
         key = str(sample.key_expr)
         if not key.startswith(self._prefix):
             return
@@ -101,51 +127,47 @@ class NodeRegistry:
         name, target, boot_id = parts
         identity = tuple(parts)
         with self._lock:
-            if self._closed or historical and identity in self._touched:
+            if self._closed:
                 return
-            if not historical and not self._initialized:
+            present = sample.kind == zenoh.SampleKind.PUT
+            address = (target, boot_id)
+            if historical:
+                if self._queried is None or self._queried is not query or identity in self._touched:
+                    return
+                self._query_overflow |= _update_presence(self._queried, name, address, present)
+                return
+            self._overflow |= _update_presence(self._live, name, address, present)
+            if self._queried is not None:
                 if len(self._touched) >= MAX_PRESENCE and identity not in self._touched:
-                    self._overflow = True
+                    self._query_overflow = True
                 else:
                     self._touched.add(identity)
-            if sample.kind == zenoh.SampleKind.PUT:
-                if name not in self._live:
-                    if len(self._live) < MAX_PRESENCE:
-                        self._live[name] = set()
-                    else:
-                        self._overflow = True
-                live = self._live.get(name)
-                if live is not None:
-                    live.add((target, boot_id))
-                    if len(live) > 16:
-                        self._live[name] = None
-                        self._overflow = True  # Some addresses cannot be tracked until resync.
-            elif name in self._live:
-                live = self._live[name]
-                if live is not None:
-                    live.discard((target, boot_id))
-                    if not live:
-                        del self._live[name]
+                self._query_overflow |= _update_presence(self._queried, name, address, present)
             if not self._notified:
                 self._notified = True
                 self._loop.call_soon_threadsafe(self._notify)
 
     async def _initial_presence(self):
+        """Initialize, then reconcile on refresh at a bounded frequency, off the control path."""
         async with self._initial_lock:
             if self._closed:
                 raise RuntimeError("registry_closed")
-            if self._initialized and not self._overflow:
+            if (
+                self._initialized and not self._overflow
+                and self._loop.time() - self._last_presence < PRESENCE_REFRESH_SECONDS
+            ):
                 return
             with self._lock:
-                self._live.clear()
+                # Keep the existing view usable while the snapshot is in flight. Live
+                # changes update both views and take precedence over historical replies.
+                queried = self._queried = {}
                 self._touched.clear()
-                self._overflow = False
-                self._initialized = False
+                self._query_overflow = False
             done = asyncio.Event()
 
             def reply(value):
                 if value.ok is not None:
-                    self._change(value.ok, historical=True)
+                    self._change(value.ok, historical=True, query=queried)
 
             def finished():
                 self._loop.call_soon_threadsafe(done.set)
@@ -161,10 +183,18 @@ class NodeRegistry:
                 )
                 await done.wait()
                 with self._lock:
+                    self._live = self._queried
+                    self._queried = None
+                    self._overflow = self._query_overflow
                     self._initialized = True
+                    self._last_presence = self._loop.time()
                     self._touched.clear()
+                self._changed.set()
             finally:
                 cancel.cancel()
+                with self._lock:
+                    self._queried = None
+                    self._touched.clear()
                 self._cancel_initial = None
 
     def _presence(self):
@@ -280,8 +310,10 @@ class NodeRegistry:
                                 raise AgentError(
                                     "node_instance_changed", node_id=name, stage="discovery",
                                 ) from None
-                            # Only repeat this read, once, for an instance not yet verified.
-                            raw = await bus.request(f"request/node/{name}", {}, timeout=0.3)
+                            # A new session can need >0.6 s to learn the router's service
+                            # routes. Only this first descriptor read gets a longer retry;
+                            # known instances and all action/control deadlines stay unchanged.
+                            raw = await bus.request(f"request/node/{name}", {}, timeout=2.0)
                     info = NodeInfo.model_validate(raw)
                     if (info.node_id, info.target, info.boot_id) != (name, target, boot_id):
                         raise AgentError("node_identity_mismatch", node_id=name, stage="discovery")

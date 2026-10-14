@@ -1,5 +1,317 @@
 # WRS-Agent V1 验收合同
 
+## 2026-10-14：任务 3e10ae75 的 ROI 判断审计
+
+只读日志：target=cup，locate/segment 同一 observation_id，infer_grasps 使用正确
+segment_id；原分割缓存返回 artifact_expired，不能重放。旧错误缺少中间计数，不能
+由 no_grasp_in_target_roi 断言分割、坐标系或索引错误。证据 grasp_roi_3e10ae75.json。
+
+对现有正式权重和官方保存 RGB-D 文件做独立验证：sa1_inds[sa2_inds] 与 fp2_inds
+一致；全部 1024 个种子 XYZ 对应采样点；解码中心对应 objectness 筛选后的种子。
+用原始相机内参直接将解码中心投影回像素，不依赖采样索引，逐项核对 ROI 归属。
+香蕉 mask：13865 像素→332 采样点→17 种子→10 ROI 候选，全场景 217 候选；
+64 像素小区域：0 采样点；256 像素小区域：5 采样点、0 种子；背景区域：95 采样点、
+3 种子，全部被 objectness 判为背景。四类结果均与独立投影完全一致。
+这验证了保存样例的索引判断，不能代替过期杯子帧的现场诊断。
+
+生产改动仅将无 ROI 候选区分 grasp_roi_not_sampled / grasp_roi_no_seed /
+grasp_roi_rejected_as_background，在 ErrorInfo.message 中附加 ROI 采样点、种子、
+场景候选及 ROI 候选数量；不保留额外图像/GPU 张量，不扩大 mask，不改变采样或阈值。
+旧错误码继续识别，未知异常仍只显示固定解释。更新后重启 grasping/04 即加载诊断。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py reports/audit_grasp_roi_task.py
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 reports/audit_grasp_roi_indices.py
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/unit/test_grasp_preview.py -q --tb=short --junitxml=reports/grasp_roi_audit_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_roi_audit_integration.xml
+$env:OPENBLAS_NUM_THREADS = '1' # 仅复测进程，减少并行 BLAS 初始化的内存开销
+& $P -X utf8 -S scripts/run.py -m pytest 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[sam3]' 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[segmentation]' -q --tb=short --junitxml=reports/grasp_roi_audit_integration_retry.xml
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/grasp/graspnet.py wrs_agent/errors.py tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py reports/audit_grasp_roi_indices.py reports/audit_grasp_roi_task.py
+```
+
+61 单元通过（1.08s），包括三类真实筛选错误经节点处理、Runtime、SQLite 和 Viewer
+文案保留原始阶段计数；未知错误仍不泄露路径。真实权重离线投影审计四类均通过；
+Torch 2.9.0+cu128、NumPy 2.5.3、RTX 5060 Laptop，源码及权重哈希见
+reports/grasp_roi_index_audit.json。Ruff 首次诊断脚本导入排序/长行失败，修正后通过。
+集成首次 2 passed / 2 failed（52.88s）：sam3 / segmentation 变体在节点发现超时，
+两组 camera / graspnet 夹具日志均记录 OpenBLAS 内存分配失败，未进入 ROI 筛选。
+原失败报告及 .local/runs/mock-0d563b33294a、mock-f3786ce6cfcf 日志保留。
+仅复测进程设 OPENBLAS_NUM_THREADS=1 后，两项均通过（31.14s）；合计四项集成均有
+通过证据，未放宽测试超时或修改生产配置。git diff --check 通过。
+未安装/下载任何依赖，未启动相机/机器人或在线付费模型；未重启用户节点。
+
+## 2026-10-14：任务 4326e422 的抓取数量与过期提示
+
+现场只读日志确认 infer_grasps 成功，候选 ID 75a1acb06c7748029a716298d1d6cd41，
+count=1；同帧定位和分割均成功。已有 GraspNet latest 与 Viewer 三次查询均返回
+artifact_expired。现有数据按原观测时间保留 30 秒；事后证据不能还原首次切标签的
+瞬时状态。命令 `scripts/run.py reports/diagnose_grasp_display.py`，报告
+reports/grasp_display_4326e422.json；没有提交动作、运行模型或重新采集相机数据。
+
+修改 Runtime overview/任务状态仅增加深拷贝的 step_outputs；不改变调度或权限。
+09 的“结果”显示成功动作生成的候选数量，旧 Agent 缺字段时明确提示；更换任务不
+显示上一任务数量。camera/panel.js 显示过期/失效/未连接等原因及机器码，ready 状态
+显示有效期剩余时间；preview.py 提供倒计时，区分无效抓取数据错误。保留原有 TTL、
+单份缓存及过期/取消时 CPU/GPU 资源清理；已释放的现场点云无法恢复。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/unit/test_step_outputs.py tests/unit/test_runtime.py tests/unit/test_camera.py -q --tb=short --junitxml=reports/grasp_display_unit_final.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_display_integration.xml
+node reports/check_grasp_cloud_browser.cjs
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/runtime.py wrs_agent/nodes/camera/preview.py examples/voice/09_viewer.py tests/unit/test_step_outputs.py tests/unit/test_grasp_preview.py tests/integration/test_grasp_pipeline.py
+```
+
+88 单元通过（3.94s）；首次 87 passed/1 failed 是单元环境未安装可选 websockets，
+测试隔离 HTTP 响应对象边界后通过，原输出保留。4 Zenoh 集成通过，使用显式离线
+模型/相机夹具验证 count=1、同帧数据、缓存替换与取消。Chrome 155.0.8059.41 实际
+WRS/WebGPU 验证单个候选、显示 1/1、剩余时间、artifact_expired 文案；8192 点含
+4096 目标点，5 次替换始终 18 个覆盖层 GPU 缓冲，旧缓冲全部 destroy，过期及切换
+后清空，保留原机器人模型，浏览器/GPU 错误为零。报告 grasp_display_browser.json；
+截图 grasp_display_expired.png 和 grasp_cloud_highlight.png 为合成验证，不是用户实景。
+Ruff 通过；未安装依赖，沿用 Python 3.12.0 / pytest 9.1.1 / Ruff 0.16.8 等当前环境。
+未自动重启用户节点、调用付费模型或驱动硬件。入口：重启 voice/07 和 09 后新任务查看。
+
+## 2026-10-14：完整场景 GraspNet 推理后筛选分割 ROI
+
+grasp/graspnet.py 改为完整有效场景采样 20000 点，保留原始像素的 ROI 归属；依据固定
+baseline 的 fp2_inds 和 objectness 顺序筛选解码候选，并校验中心坐标一致。目标 ROI
+筛选在夹爪宽度/前 32 项排序之前。移除旧 sample_target，检查脚本改为完整场景采样；
+ROI 无候选以 no_grasp_in_target_roi 经过节点、Runtime、日志和 Viewer 透传。原有
+同帧数据、取消/过期校验、最新单份缓存和 Viewer 高亮保持不变，不新增历史点云副本。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/unit/test_grasp_preview.py -q --tb=short --junitxml=reports/grasp_scene_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_scene_integration.xml
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 reports/check_full_scene_graspnet.py
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/grasp/graspnet.py wrs_agent/errors.py scripts/check_box_segmentation.py tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/fixtures/grasp_perception_node.py reports/check_full_scene_graspnet.py
+```
+
+50 单元、4 集成通过，0 failed/skipped；集成 42.88s，使用实际 Zenoh 与显式合成
+相机/模型夹具，验证 SAM3、FastSAM、YOLO 框链路以及替换/取消时旧数据失效。
+最初沙箱单元完成前 25 项后停滞，已中断，沙箱外执行通过；一次 Ruff 长行已修正。
+真实模型离线检查：Python 3.12.0、Torch 2.9.0+cu128、NumPy 2.5.3、RTX 5060 Laptop，
+固定现有源码/权重及同一香蕉样例；采样包含 332 个目标点和 19668 个背景点。
+217 个解码候选中 ROI 精确保留 10 个，开口 .05057–.08598m，默认 .05m 全部拒绝，
+保留 no_grasp_within_gripper_width。单独虚拟 .1m 诊断验证成功返回这 10 项，不修改
+生产配置；该脚本首次读取 GraspCandidate 时误用字典下标，修正后完整复验通过。
+预热后 5 次约 98.47–124.93ms，中位数 106.85ms，含完整场景采样/传输到 GPU/解码/ROI
+及宽度筛选，不含 Camera/FastSAM/Zenoh/Planner/碰撞。报告 grasp_full_scene_20261014.json。
+Ruff 通过；没有增加依赖或下载，没有启动相机/机器人/在线模型。完整场景输入仍不能
+代替碰撞检查，collision_checked=false；D405 现场质量和物理抓取仍 unverified。
+使用入口：重启 04_start_graspnet.py 后提交新任务，旧结果不自动重算。
+
+## 2026-10-14：GraspNet 输入审计与正式权重离线测时
+
+代码核对：GraspNetNode 接收同帧完整点云，但 GraspNetPredictor.sample_target 仅从
+分割目标抽取 20000 点送网络；当前没有场景点云碰撞过滤，collision_checked=false。
+FastSAM 示例默认 fastsam-box：YOLO 定位框经 location_id 绑定同帧 RGB，FastSAM
+先整图分割，再按掩码外接框和定位框的 IoU 选目标；没有 CLIP 文本匹配或 ROI 裁剪。
+本次仅审计和离线测时，没有修改生产推理流程。
+
+实际命令：`.local/venvs/graspnet/Scripts/python.exe -X utf8 reports/measure_graspnet_latency.py`。
+首次沙箱读取权重 Path.resolve 被 WinError 5 拒绝；相同脚本在沙箱外完成有限离线测试，
+未访问设备、网络或下载资源。Python 3.12.0、Torch 2.9.0+cu128、NumPy 2.5.3，
+RTX 5060 Laptop，使用已核验的 checkpoint-rs.tar 和保存的官方香蕉 RGB-D 样例。
+输入 720×1280，825160 个有效场景点、13865 个目标点，网络均采样 20000 点。
+模型构造/加载 0.335s（不含进程启动与顶层导入）；首次 infer 1.021s；另预热一次后，
+5 次目标输入 73.13–81.35ms，中位数 77.04ms。将完整场景作为采样范围的对照预热后
+5 次 101.81–106.49ms，中位数 103.34ms；这是耗时对照，未按目标筛选候选或检查碰撞。
+计时使用 CUDA 同步，包含采样、上传、前向、解码、回传及候选构造；不含相机、分割、
+Zenoh、Planner 或碰撞过滤。未验证 D405 联合运行、并发负载、物理碰撞或抓取质量。
+早期 graspnet_trained.json 的 0.405s 属于随机初始化网络，不能作为正式权重延迟。
+证据：reports/graspnet_latency_20261014.json；真实模型测时通过，不等同物理抓取验收。
+
+## 2026-10-14：抓取候选同帧点云与分割高亮
+
+修改文件：camera/preview.py 使用候选自带的 SegmentData，背景保留原始 RGB，目标点
+标为粉紫色；两组采样合计不超过 8192 点，小目标单独分配预算，无效 XYZ 被过滤。
+panel.js 显示图例和采样目标点数；grasp/node.py 只缓存一份结果，新推理开始即调用
+ArtifactCache.clear() 释放旧观测引用，旧 candidate_set_id 不可再读取；技能说明与文档
+同步这一生命周期。预览更换候选前丢旧 CPU 数据，读取/编码后重新核对候选、任务和
+观测编号，防止取消/替换期间的迟到结果恢复。没有修改相机/YOLO/推理频率。
+scene.js 原有清理会删除模型并 destroy 自有几何缓冲，此轮新增独立回归和实际 GPU 验证。
+
+命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/unit/test_segmentation_preview.py tests/unit/test_camera.py -q --tb=short --junitxml=reports/grasp_cloud_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py tests/integration/test_camera_viewer.py -q --tb=short --junitxml=reports/grasp_cloud_integration.xml
+& $P -X utf8 -S scripts/run.py -m pytest 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[sam3]' -q --tb=short --junitxml=reports/grasp_cloud_sam3_retry.xml
+node tests/unit/camera_scene.mjs
+node reports/check_grasp_cloud_browser.cjs
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/camera/preview.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/vision/artifacts.py wrs_agent/skills/vision/grasping.py tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py
+```
+
+结果：64 单元通过（1.76s）；集成首次 5 passed、1 failed（67.64s），失败发生在相机
+夹具启动，`.local/runs/mock-bdac09d619ec/camera.log` 记录 OpenBLAS 内存分配失败，
+不是着色/推理断言失败。未改代码或放宽时限，单独复测 1 passed（13.60s），保留两份报告。
+全部 6 项集成有通过证据，无跳过；涵盖 SAM3/FastSAM/框分割链、旧编号过期与 WRS 页面。
+Node.js 200 次替换后自有缓冲数量固定，旧缓冲逐个验证 destroy，重复 clear 和 scene_init
+恢复通过。Chrome 155.0.8059.41 实际 WRS WebGPU 页面验证：8192 点（目标 4096）、
+3 个候选；5 次替换始终 34 个覆盖层 GPU 缓冲，旧缓冲全部 destroy；标签切换、过期后
+覆盖层清空，原机器人场景保留，浏览器及 GPU 错误数 0。Ruff、所改文件 diff --check 通过。
+证据 `reports/grasp_cloud_browser.json`，截图 `reports/grasp_cloud_highlight.png`。
+
+依赖实读：Python 3.12.0、NumPy 2.5.3、Pillow 12.3.0、Zenoh 1.9.0、Pydantic 2.13.5、
+pytest 9.1.1、Ruff 0.16.8（reports/grasp_cloud_versions.json）。未安装或下载依赖/权重。
+所有图像与模型为显式合成夹具，D405 现场与真实模型未重跑；未连接/驱动真实机器人，
+未调用在线模型或重启用户进程。下一入口：重启 grasping/04_start_graspnet.py 和
+voice/09_viewer.py，刷新页面，重新生成抓取后选择“点云 → 抓取候选”。
+
+## 2026-10-14：视觉技能发现恢复与规划失败诊断
+
+现场只读证据 `reports/visual_description_live.json`：同环境新客户端发现 9 个节点，
+Agent 自己的 request/nodes 只有 tts/wrs/agent；YOLO 查询的一次结果非空。
+“当前视野中没有可见物体”是 Planner 的 ANSWER，并无 describe_objects 动作。
+46c2b0b0 的独立任务记录 SUCCEEDED，总览 FAILED 是后续规划错误覆盖旧 execution.state。
+没有原失败计划，具体错误引用未确认；observe.output=null 无法绑定 text 已离线复现。
+
+修改：registry.py 在 refresh 时每两秒至多重新核对一次在线名单，合并查询期间实时事件，
+保留原有实例/地址/容量保护；runtime.py 不让新规划回复/失败覆盖旧任务状态，新增
+planning_reason；09_viewer 使用该字段；plan_validation.py 的 incompatible_step_output
+显示源步骤/字段/技能与目标参数及原因；robot 技能说明和 wire.py 提示词明确 observe
+不检测相机，output=null 不能绑定输出，空场景不能推出空画面。未改 YOLO 模型/阈值/FPS。
+
+真实命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_registry.py tests/unit/test_revision_regressions.py tests/unit/test_step_outputs.py tests/unit/test_runtime.py tests/unit/test_llm.py -q --tb=short
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_dynamic_nodes.py tests/integration/test_dynamic_system.py tests/integration/test_skill_discovery.py tests/integration/test_vision_speech.py tests/integration/test_grasp_pipeline.py -q --tb=short
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/registry.py wrs_agent/runtime.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/robot/definitions.py examples/voice/09_viewer.py tests/unit/test_registry.py tests/unit/test_revision_regressions.py tests/unit/test_step_outputs.py tests/integration/test_dynamic_nodes.py
+```
+
+结果：302 passed / 6.88s；21 passed / 85.83s；Ruff 通过，0 failed / 0 skipped。
+所改文件 git diff --check 通过。依赖实读：Python 3.12.0、eclipse-zenoh 1.9.0、
+Pydantic 2.13.5、pytest 9.1.1、Ruff 0.16.8；报告 reports/visual_diagnosis_versions.json。
+最终审查补上查询身份隔离：取消的旧查询迟到回复不能写入新查询的临时名单。
+复测 `pytest tests/unit/test_registry.py tests/integration/test_dynamic_nodes.py::test_existing_agent_and_client_accept_an_unlisted_late_node -q --tb=short`：33 passed / 5.25s（重复项，不另计总数）。
+集成输出 `reports/visual_discovery_integration.txt`。真实 Zenoh 测试覆盖正常晚到节点，及
+故意丢弃 Agent 实时通知后仍靠在线查询恢复；模型/相机/播报/抓取是显式离线夹具。
+现场通知缺失的底层原因和修复后真实云模型选技能仍 unverified；没有付费调用或硬件操作，
+没有重启用户运行进程。使用更新需重启 07_start_llm_voice.py 和 09_viewer.py。
+
+## 2026-10-14：分割上游超时与 SAM 掩码显示
+
+任务 `8f6f4d9b` 的定位成功，segment_region 日志 reason 为
+`request_timeout: No response was received within the request deadline.`，输出为空。
+结合当时异常类型和代码路径指向上游发现查询，FastSAM 尚未开始推理；后续 GraspNet
+BLOCKED 是依赖失败。旧分割节点把结构化异常转为字符串，Executor 再退回 action_failed。
+现场只读探针：新连接对 YOLO/FastSAM 连续两次 0.3 秒描述查询均超时，接着 2 秒窗口
+成功读到 ready。这个模式与初次连接/路由准备延迟相符，不据此断言模型或点云故障。
+证据：reports/segmentation_failure_diagnosis.json；仅描述、日志查询，不读取设备帧。
+
+修改文件：registry.py 仅对尚未验证的实例，将原有唯一一次描述读取重试放宽到 2 秒；
+保留前后启动身份/地址检查和已知实例的快速失败，不重试任何动作。segmentation/node.py、
+fastsam.py 和 errors.py 分类上游超时、掩码不匹配/歧义、网格不符、显存不足等错误，
+保留节点及阶段且不公开未知异常原文。最新成功分割接口复用原 ArtifactCache，不新增
+历史图像仓库、不续期；data.py 增加只读 LatestSegment 引用合同。
+camera/preview.py、panel.js 和 voice/09 增加「分割」标签：按需 2 Hz 查询元数据，
+新编号只取一次同帧数据、画绿色掩码与橙色定位框；失败/取消/过期/替换后清除旧图。
+绘制期间再次核对引用，避免撤销结果重新显示。查看不调用相机最新帧或任何推理技能。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_segmentation_failure.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_segmentation_discovery.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_segmentation_preview.py tests/unit/test_registry.py tests/unit/test_fastsam.py tests/unit/test_grasp_perception.py tests/unit/test_locations.py tests/unit/test_camera.py -q --junitxml=reports/segmentation_preview_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py tests/integration/test_camera_viewer.py tests/integration/test_dynamic_nodes.py tests/unit/test_errors_and_versions.py tests/unit/test_step_outputs.py -q --junitxml=reports/segmentation_preview_integration.xml
+node reports/check_segmentation_browser.cjs
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/registry.py wrs_agent/errors.py wrs_agent/nodes/segmentation wrs_agent/nodes/camera/preview.py examples/voice/09_viewer.py tests/unit/test_registry.py tests/unit/test_segmentation_preview.py tests/integration/test_grasp_pipeline.py
+git -c diff.ignoreSubmodules=all diff --check -- wrs_agent/registry.py wrs_agent/errors.py wrs_agent/nodes/segmentation wrs_agent/nodes/camera/preview.py wrs_agent/nodes/camera/panel.js examples/voice/09_viewer.py examples/voice/README.md tests/unit/test_registry.py tests/unit/test_segmentation_preview.py tests/integration/test_grasp_pipeline.py docs/ACCEPTANCE.md
+```
+
+**通过**：105 passed in 2.03s + 52 passed in 84.37s，总计 157 / 0 failed / 0 skipped；
+Ruff 通过。集成使用真实 Zenoh、模型替身及 WRS 虚拟页面。新逻辑现场只读发现耗时
+2.437 秒，YOLO/FastSAM 均 ready，见 reports/segmentation_discovery_fixed.json。
+Chrome 155.0.8059.41 实际 WebGPU 页面验证分割叠加、标签切换、失效清除、原 13 个
+机器人模型保留，JS 异常为 0；见 reports/segmentation_scene_browser.json 和
+reports/segmentation_overlay.png。首轮浏览器探针未等机器人场景加载便取基线 0，
+导致比较失败；修正探针等待后重跑通过，不把它记成产品失败或隐藏首次结果。
+
+依赖沿用上一节 Python 3.12.0、Pydantic 2.13.5、Zenoh 1.9.0、NumPy 2.5.3、
+pytest 9.1.1、Ruff 0.16.8；没有安装、下载或修改锁文件。
+**未验证**：现场 D405/FastSAM 真实杯子分割与完整 GPU 抓姿流程；本轮没有重新提交任务、
+在线模型调用、设备启动或机器人动作。浏览器截图明确为合成测试数据，不是本次杯子结果。
+下一入口：重启 02/03/04、voice/07 和 09，刷新页面，完成分割后点「分割」；失败则
+检查新的具体错误。旧失败记录不重写、不自动恢复执行。
+
+## 2026-10-14：抓姿失败诊断、结构化错误与结果类型校验
+
+只读 `examples/grasping/.local/state` 的动作日志，定位任务
+`4d9622b94562436f85c0142de20d8860`：定位成功，GraspNet 收到的 segment_id 与该步
+location_id 完全相同，计划漏掉分割；实际失败 reason 是 node_unavailable，在访问
+segmentation 时发生，尚未调用点云推理。只读查询 7451 / voice-goal 的节点目录同样
+没有 segmentation。证据 `reports/grasp_failure_diagnosis.json` 同时保存相关动作和
+当前节点/任务状态；未查询帧、提交动作、改变现场任务或重启节点。
+
+修改：grasping 技能参数/输出的 JSON Schema 用 x-wrs-artifact 标明定位、分割、
+抓姿候选编号；plan_validation 在动作下发前校验语义种类，wire 生成厂商严格 Schema
+时去掉该扩展注解，普通文本输出绑定不变。没有新增提示词、自动重试或模型调用。
+SkillFailure/Executor 保留明确 ErrorInfo；GraspNet 区分分割不可达、结果失效、
+有效点不足、无适用开口候选、无效模型输出、显存不足等失败，不公开未知异常原文。
+09 显示错误码、来源和安全说明；补充 voice README 的正确链路、故障及重启说明。
+测试覆盖消息/日志/界面传递、整计划执行前拒绝、两种合法分割路径及真实 Zenoh 合同。
+
+实际命令（从仓库根目录）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_live_grasp_failure.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py -q --junitxml=reports/grasp_failure_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_environment.py tests/unit/test_runtime.py tests/unit/test_revision_regressions.py tests/unit/test_llm.py tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py tests/integration/test_vision_speech.py -q --junitxml=reports/grasp_failure_regression.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/errors.py wrs_agent/executor.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/vision/grasping.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/grasp/graspnet.py examples/voice/09_viewer.py tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py
+git -c diff.ignoreSubmodules=all diff --check -- wrs_agent/errors.py wrs_agent/executor.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/vision/grasping.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/grasp/graspnet.py examples/voice/09_viewer.py examples/voice/README.md tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py docs/ACCEPTANCE.md
+```
+
+**通过**：70 passed in 3.18s；274 passed in 139.32s，总计 344 passed / 0 failed /
+0 skipped。后者使用真实 Zenoh、隔离回环模型替身及 WRS 虚拟场景，包括取消和 UNKNOWN
+语义回归；不代表真实模型或设备验证。Ruff 和所改文件的 diff 空白检查通过。
+首次单元命令在受限沙箱内无输出
+挂起，核对命令行后仅结束本轮测试进程，在沙箱外重跑通过；没有停止任何业务节点。
+Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh 1.9.0、NumPy 2.5.3、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8；本次不改依赖或锁文件。
+
+**未验证**：修改后的 D405/FastSAM/GraspNet 联合实测和真实 GPU 故障；没有模型付费
+调用或真实机器人动作。原失败记录保留，不补写成新错误或自动重试。
+下一入口：启动同环境的 03 FastSAM；重启 02/03/04、voice/07、09，发布新技能合同并
+加载校验/错误显示。确认相机及模型节点的 ENDPOINT、ENV_ID、SESSION 与 09 一致。
+
+## 2026-10-14：GraspNet 启动依赖检查与通用错误提示
+
+04 原先使用共享解释器启动时，缺少 pointnet2._ext，异常发生在建立节点后的模型
+导入阶段。项目 GraspNet 环境已有两个编译扩展。本次修改 04、grasping README 和
+test_grasping_example；本机 .idea 的 04 运行配置单独选择该环境，不改变其他配置。
+检查在创建节点/读取会话口令前执行；按用户要求，错误中不出现当前解释器或本机
+绝对路径，只给出缺失模块、通用环境说明及项目文档入口。
+
+实际验证命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasping_example.py tests/unit/test_grasp_perception.py -q --junitxml=reports/graspnet_startup_unit.xml
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 -m reports.check_graspnet_startup
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -m examples.grasping.04_start_graspnet
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/grasping/04_start_graspnet.py tests/unit/test_grasping_example.py
+git -c diff.ignoreSubmodules=all diff --check -- examples/grasping/04_start_graspnet.py examples/grasping/README.md tests/unit/test_grasping_example.py docs/ACCEPTANCE.md docs/DEPENDENCIES.md
+```
+
+最终 **32 passed in 0.68s，0 failed/skipped**；Ruff 和本次文件 diff 检查通过。
+共享环境实际运行按预期退出 1，仅显示通用说明；没有创建节点或发出请求。
+专用环境真实验证：Torch 2.9.0+cu128、NumPy 2.5.3、原生扩展 0.1.0，固定训练权重
+加载并在独立工作线程推理已有 RGB-D 目标点云，返回 32 个候选。证据为
+reports/graspnet_startup_environment.json；不把保存数据推理记作相机或抓取实测。
+Python 3.12.0；无需新增依赖、下载或重新编译，现有上游 torch.cross 弃用警告保留。
+
+初次真实探针受沙箱文件权限限制；改在外部运行。探针按文件执行时找不到 examples，
+改从根目录以 -m 运行后通过。首次 Ruff 行宽问题已修复；全仓 diff 检查发现其他正在
+修改的 00_start_router.py 行尾空格，未改动该文件，本次仅报告所改文件检查结果。
+**未验证**：常驻节点联合运行、D405 实际输入及机器人执行。本轮未启动设备或在线模型。
+
 ## 2026-10-14：以响应耗时为目标恢复完整 Schema 提示
 
 用户明确主要目标是减少耗时，要求撤回没有达到该目标的精简。wire.py 恢复在系统

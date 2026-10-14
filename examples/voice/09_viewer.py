@@ -15,6 +15,7 @@ from wrs_agent.schemas import TERMINAL, TextInput, new_id
 CONFIG = Path(__file__).with_name("wrs_bindings.toml")
 VIEWER_PORT = 8001
 GRASP_NODE = "graspnet"  # 只读同一 voice-goal 环境的结果；查看不会触发推理。
+SEGMENT_NODE = "segmentation"
 # 这些判定自带正文：ANSWER 是模型的回答，其余是澄清或失败原因。
 # DONE/IDLE 的 reason 可能来自上一次任务，不能当成本次回复。
 REPLIED = {"ANSWER", "CLARIFY", "FAILED", "STALE", "REQUIRES_CONFIRMATION"}
@@ -30,6 +31,31 @@ REASONS = {
 }
 # 新目标先停掉上一条；停不下来就放弃新目标，不在未确认的状态上叠加运动。
 CANCEL_SECONDS = 5.0
+
+
+def describe_fault(error):
+    """Show the public explanation alongside its machine code and source."""
+    if not error:
+        return "（无）"
+    where = "／".join(filter(None, (error.get("node_id"), error.get("stage"))))
+    code = f"{error['code']}（{where}）" if where else error["code"]
+    message = error.get("message")
+    return f"{code}：{message}" if message and message != error["code"] else code
+
+
+def describe_results(overview):
+    """Completed action output is a historical result, not a live grasp authorization."""
+    outputs = overview.get("step_outputs")
+    if outputs is None:
+        return "Agent 未提供步骤结果；请重启 Agent 加载新代码。"
+    results = []
+    for step, output in outputs.items():
+        if (overview["steps"].get(step) == "SUCCEEDED"
+                and isinstance(output.get("candidate_set_id"), str)
+                and type(output.get("count")) is int):
+            results.append(f"{step}：已生成 {output['count']} 个抓取候选")
+    return "；".join(results) or "（无）"
+
 
 if __name__ == "__main__":
     use_local_token("voice")
@@ -84,6 +110,7 @@ if __name__ == "__main__":
         plan_panel.add_label("reply", value="（无）", label="回复")
         plan_panel.add_label("task", value="无", label="任务")
         plan_panel.add_label("steps", value="无", label="步骤")
+        plan_panel.add_label("results", value="（无）", label="结果")
         # UNKNOWN 只说“无法确认”，原因在 error 里：哪个节点、哪个阶段、什么代码。
         plan_panel.add_label("fault", value="（无）", label="故障")
         plan_panel.add_label("calls", value="模型 0 次", label="调用")
@@ -100,13 +127,6 @@ if __name__ == "__main__":
 
         def describe(exc):
             return exc.error.message if isinstance(exc, AgentError) else "节点无响应"
-
-        def describe_fault(error):
-            """UNKNOWN/FAILED 的机器可读原因：没有它，界面上只剩一个状态词。"""
-            if not error:
-                return "（无）"
-            where = "／".join(filter(None, (error["node_id"], error["stage"])))
-            return f"{error['code']}（{where}）" if where else error["code"]
 
         def describe_timing(planning):
             parts = []
@@ -267,8 +287,9 @@ if __name__ == "__main__":
                 plan_panel.set_value("reply", "正在规划…")
             else:
                 # ANSWER 的正文是模型的回答，不是错误；其余判定给的是澄清或原因。
-                replied = verdict in REPLIED and overview["reason"]
-                plan_panel.set_value("reply", overview["reason"] if replied else "（无）")
+                reason = overview.get("planning_reason", overview["reason"])
+                replied = verdict in REPLIED and reason
+                plan_panel.set_value("reply", reason if replied else "（无）")
             plan_panel.set_value(
                 "task",
                 "无"
@@ -279,6 +300,7 @@ if __name__ == "__main__":
             active = "、".join(overview["active_actions"])
             done = "；".join(f"{name}={state}" for name, state in overview["steps"].items())
             plan_panel.set_value("steps", f"执行中 {active}｜{done}" if active else done or "无")
+            plan_panel.set_value("results", describe_results(overview))
             fault = overview.get("planning_error") if verdict == "FAILED" else None
             fault_text = describe_fault(fault or overview["error"])
             if verdict == "FAILED" and "planning_error" not in overview:
@@ -325,6 +347,7 @@ if __name__ == "__main__":
             with viewer_hub(VIEWER_PORT, camera={
                 "endpoint": "tcp/127.0.0.1:7451", "env_id": "voice-goal",
                 "grasp_node_id": GRASP_NODE,
+                "segmentation_node_id": SEGMENT_NODE,
             }):
                 print(f"打开 http://127.0.0.1:{VIEWER_PORT}，Ctrl+C 退出观察。", flush=True)
                 print("按住“按住说话”说“向前移动”；说“停止”会立即走控制通道。", flush=True)

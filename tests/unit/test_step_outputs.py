@@ -165,7 +165,31 @@ async def test_invalid_binding_is_rejected_before_any_action(pipeline, field, pa
     await runtime.start(TaskRequest(request_id=new_id(), plan=plan(field, parameter)))
     failure = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
     assert failure["error"]["code"] == code
+    if code == "incompatible_step_output":
+        assert "see.missing（describe_objects） → say.text（speak）" in failure["error"]["message"]
+        assert failure["error"]["node_id"] == "tts"
     assert vision.executions == tts.executions == 0
+
+
+async def test_robot_observe_cannot_supply_speech_text(pipeline, make_env, make_llm):
+    runtime, vision, tts = pipeline
+    robot = make_env(duration=0.01)
+    runtime.nodes["wrs"] = OfflineNode(robot)
+    runtime.bindings["observe"] = "wrs"
+    invalid = plan().model_dump()
+    invalid["steps"][0]["skill"] = "observe"
+    runtime.planner = ModelPlanner(make_llm(json.dumps({"kind": "execute", "plan": invalid})))
+    try:
+        await runtime.goal(GoalRequest(request_id="robot-is-not-camera", goal="画面中有什么"))
+        await runtime.planning.worker
+        failure = runtime.goal_status("robot-is-not-camera")
+        assert failure["state"] == "FAILED" and failure["task_id"] is None
+        assert failure["error"]["code"] == "incompatible_step_output"
+        assert "see.text（observe） → say.text（speak）" in failure["error"]["message"]
+        assert "未声明该输出字段" in failure["error"]["message"]
+        assert robot.executions == vision.executions == tts.executions == 0
+    finally:
+        await robot.close()
 
 
 def test_reference_requires_dependency_and_excludes_literal_argument():
@@ -189,6 +213,24 @@ async def test_success_output_is_retained_by_action_and_survives_latest_change(p
     assert duplicate.status.output == status.output and vision.executions == 1
 
 
+async def test_overview_and_task_outputs_are_copied_and_do_not_leak_to_a_new_task(pipeline):
+    runtime, vision, _ = pipeline
+    assert runtime.snapshot()["step_outputs"] == {}
+    first = await runtime.start(TaskRequest(request_id=new_id(), plan=plan()))
+    snapshot = await eventually(runtime.snapshot, lambda s: s["state"] == "SUCCEEDED")
+    expected = snapshot["step_outputs"]["see"]["text"]
+    snapshot["step_outputs"]["see"]["text"] = "changed-by-viewer"
+    assert runtime.snapshot()["step_outputs"]["see"]["text"] == expected
+    saved = runtime.task_status(first["task_id"])
+    saved["step_outputs"]["see"]["text"] = "changed-by-client"
+    assert runtime.task_status(first["task_id"])["step_outputs"]["see"]["text"] == expected
+
+    await runtime.start(TaskRequest(request_id=new_id(), plan=plan("missing", "text")))
+    failed = await eventually(runtime.snapshot, lambda s: s["state"] == "FAILED")
+    assert failed["step_outputs"] == {} and vision.executions == 1
+    assert runtime.task_status(first["task_id"])["step_outputs"]["see"]["text"] == expected
+
+
 async def test_late_description_after_cancel_cannot_reach_speaker(pipeline):
     runtime, vision, tts = pipeline
     entered, gate = asyncio.Event(), asyncio.Event()
@@ -207,3 +249,4 @@ async def test_late_description_after_cancel_cannot_reach_speaker(pipeline):
     await eventually(runtime.snapshot, lambda s: s["state"] == "CANCELLED")
     assert tts.executions == 0
     assert not vision.status(runtime.action_history[0]["action_id"]).output
+    assert runtime.snapshot()["step_outputs"] == {}

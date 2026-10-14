@@ -371,6 +371,20 @@ async def test_later_planning_failure_does_not_change_completed_task(make_env, m
         assert runtime.goal_status("bad-goal")["state"] == "FAILED"
         assert runtime.task_status(first["task_id"])["state"] == "SUCCEEDED"
         assert runtime.task_status(first["task_id"])["reason"] == ""
+        snapshot = runtime.snapshot()
+        assert snapshot["task_id"] == first["task_id"]
+        assert snapshot["state"] == "SUCCEEDED" and snapshot["reason"] == ""
+        assert snapshot["error"] is None
+        assert snapshot["planning"] == "FAILED"
+        assert snapshot["planning_reason"] == runtime.goal_status("bad-goal")["reason"]
+        assert snapshot["planning_error"] == runtime.goal_status("bad-goal")["error"]
+
+        runtime.planner = ModelPlanner(make_llm('{"kind":"answer","text":"你好"}'))
+        await runtime.goal(GoalRequest(request_id="answer", goal="你好"))
+        await runtime.planning.worker
+        snapshot = runtime.snapshot()
+        assert snapshot["state"] == "SUCCEEDED" and snapshot["reason"] == ""
+        assert snapshot["planning_reason"] == "你好" and snapshot["planning_error"] is None
     finally:
         await runtime.close()
         await env.close()
