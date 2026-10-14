@@ -458,10 +458,35 @@ function renderViewer(data) {
   }[v.state] || v.detail || "";
   const frame = $("sceneFrame");
   if (monitorOpen && v.state !== "starting" && v.state !== "failed" && frame.dataset.loaded !== url) {
+    // A new page has no camera panel until it says so.
+    $("cameraToggle").hidden = true;
     frame.src = url;
     frame.dataset.loaded = url;
   }
 }
+
+let cameraVisible = false;
+
+function sendCamera() {
+  const frame = $("sceneFrame");
+  if (!frame.src) return;
+  frame.contentWindow?.postMessage(
+    { type: "wrs-camera-panel", visible: cameraVisible }, new URL(frame.src).origin,
+  );
+}
+
+window.addEventListener("message", (e) => {
+  if (e.source !== $("sceneFrame").contentWindow || e.data?.type !== "wrs-camera-panel") return;
+  if (!e.data.ready) return;
+  $("cameraToggle").hidden = false;
+  sendCamera();
+});
+
+$("cameraToggle").onclick = () => {
+  cameraVisible = !cameraVisible;
+  $("cameraToggle").setAttribute("aria-pressed", String(cameraVisible));
+  sendCamera();
+};
 
 function renderRobot(data) {
   const r = data.robot;

@@ -192,6 +192,9 @@ body.dragging iframe { pointer-events: none; }
   border-radius: 6px; padding: 5px 12px; font-size: 13px; text-decoration: none;
 }
 .frame-tabs button.active { color: var(--fg); border-color: var(--accent); background: var(--panel); }
+.frame-tabs button { cursor: pointer; }
+.frame-tabs button[hidden] { display: none; }
+.frame-tabs #cameraToggle[aria-pressed="true"] { color: #fff; background: var(--accent); border-color: var(--accent); }
 .frame-cap {
   position: absolute; bottom: 8px; left: 10px; font-size: 13px; color: #f6f1e8;
   background: rgba(74,60,46,.72); padding: 3px 9px; border-radius: 4px; z-index: 2;
