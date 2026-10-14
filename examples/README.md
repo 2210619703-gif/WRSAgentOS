@@ -168,9 +168,9 @@ IDE 默认也使用同一仓库的自动口令。只有选择手动配置时，�
 | [01_plan.py](models/01_plan.py) | 读取 WRS 当前状态和技能，在线模型提出计划，不执行 |
 | [02_execute.py](models/02_execute.py) | 在线模型 → Planner → Runtime → 独立 WRS 节点执行 |
 
-所有厂商共用一组变量：`LLM_PROTOCOL` 选线协议（`openai_chat`/`openai_responses`/`anthropic_messages`），`LLM_BASE_URL`、`LLM_MODEL`、`LLM_API_KEY` 选端点、模型和凭据。GLM、DeepSeek、Qwen、Gemini、vLLM、Ollama 等 OpenAI 兼容服务用 `openai_chat`，OpenAI 官方用 `openai_responses`，Claude 用 `anthropic_messages`；各厂商地址见 [.env.example](../.env.example)。key 仅从环境读取，不要写进代码或提交；`.env` 不自动加载。两份脚本直接在线执行，可能产生服务费用，没有离线回退或额外代码开关。
+所有厂商共用一组变量：`LLM_PROTOCOL` 选线协议（`openai_chat`/`openai_responses`/`anthropic_messages`），`LLM_BASE_URL`、`LLM_MODEL`、`LLM_API_KEY` 选端点、模型和凭据。GLM、DeepSeek、Qwen、Gemini、vLLM、Ollama 等 OpenAI 兼容服务用 `openai_chat`，OpenAI 官方用 `openai_responses`，Claude 用 `anthropic_messages`；各厂商地址见 [.env.example](../.env.example)。key 仅从环境读取，不要写进代码或提交。直接运行这两份脚本时，会先将仓库根目录 `.env` 加载到环境；已有环境变量优先，且不依赖运行时工作目录。两份脚本直接在线执行，可能产生服务费用，没有离线回退或额外代码开关。
 
-`LLM_MODEL` 与 `LLM_BASE_URL` 必填：API Key 只做身份验证，不会选择模型，本项目也不假定默认厂商。请在 `.env` 中填写后，在 PyCharm 的 `01_plan`、`02_execute` 运行配置中选择该 `.env` 文件。配置缺失或非法时，示例在启动节点和创建 HTTP 客户端之前明确提示对应变量。旧版 `GLM_API_KEY`/`GLM_MODEL`/`GLM_BASE_URL` 分别改名为 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，再加 `LLM_PROTOCOL=openai_chat`。
+`LLM_MODEL` 与 `LLM_BASE_URL` 必填：API Key 只做身份验证，不会选择模型，本项目也不假定默认厂商。请在仓库根目录 `.env` 中填写后，直接在 PyCharm 运行 `01_plan.py` 或 `02_execute.py`，无需额外配置环境文件。配置缺失或非法时，示例在启动节点和创建 HTTP 客户端之前明确提示对应变量。旧版 `GLM_API_KEY`/`GLM_MODEL`/`GLM_BASE_URL` 分别改名为 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，再加 `LLM_PROTOCOL=openai_chat`。加载只发生在这两份脚本的启动入口；导入示例、`LLMConfig.from_env()` 和其它服务入口不会自动读取 `.env`。依赖由 `./scripts/bootstrap.ps1 -Extra llm` 安装。
 
 ```powershell
 ./scripts/run.ps1 examples/models/01_plan.py

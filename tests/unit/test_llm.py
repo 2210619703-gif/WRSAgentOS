@@ -522,6 +522,7 @@ async def test_chat_content_is_a_plan_only_in_explicit_json_mode(mode, kind):
                 assert body["response_format"]["json_schema"] == {
                     "name": "plan_decision", "strict": True, "schema": decision_schema(REQUEST),
                 }
+            assert '"properties"' in body["messages"][0]["content"]
             assert not {"tools", "tool_choice"} & body.keys()
             assert "propose_plan" not in body["messages"][0]["content"]
             assert body["enable_thinking"] is False
@@ -653,6 +654,43 @@ def test_strict_schema_without_skills_can_only_answer_or_clarify():
     assert "$defs" not in schema
     assert schema["properties"]["kind"]["enum"] == ["answer", "clarify"]
     assert schema["properties"]["plan"] == {"type": "null"}
+
+
+@pytest.mark.parametrize("mode", ["tools", "json_object", "json_schema"])
+@pytest.mark.parametrize("capabilities", ["both", "vision", "speech", "none"])
+def test_json_prompts_preserve_contract_when_capabilities_change(mode, capabilities):
+    from wrs_agent.planner.providers.wire import SYSTEM_PROMPT, encode_for_model
+    from wrs_agent.skills.speech import SKILLS
+    from wrs_agent.skills.vision import DESCRIBE
+
+    available = {
+        "both": [DESCRIBE.spec, SKILLS["speak"].spec], "vision": [DESCRIBE.spec],
+        "speech": [SKILLS["speak"].spec], "none": [],
+    }
+    request = ModelRequest("看看画面里有什么。", {
+        "world": {}, "skills": [spec.model_dump() for spec in available[capabilities]],
+    })
+    body = PROTOCOLS["openai_chat"].request_body(request, config(output_mode=mode))
+    prompt = body["messages"][0]["content"]
+    if mode == "tools":
+        assert prompt == SYSTEM_PROMPT
+        assert body["tools"][0]["function"]["parameters"] == tool_schema()
+    elif mode == "json_object":
+        assert prompt.endswith(" Decision JSON schema: " + encode_for_model(tool_schema()))
+    else:
+        schema = decision_schema(request)
+        assert body["response_format"] == {"type": "json_schema", "json_schema": {
+            "name": "plan_decision", "strict": True, "schema": schema,
+        }}
+        assert prompt.endswith(" Decision JSON schema: " + encode_for_model(schema))
+        # Examples must not teach a call the strict schema will force into another skill.
+        assert ('"skill": "speak"' in prompt) == (capabilities == "both")
+        if capabilities == "vision":
+            assert '"skill":"describe_objects"' in prompt
+            assert '"step_id":"say"' not in prompt
+        if capabilities in {"speech", "none"}:
+            assert '"skill":"describe_objects"' not in prompt
+            assert '"skill": "describe_objects"' not in prompt
 
 
 def anthropic_text(content):

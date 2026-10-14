@@ -116,6 +116,13 @@ LLM_TOOL_CHOICE 在两种 JSON 模式下无效；`reasoning_effort=none` 不能�
 坏 JSON、截断、错误工具调用照常拒绝，不补括号、不自动切换模型或重试。
 默认 tools 模式保持正文只作 ANSWER，json_object 仅约束语法，json_schema 约束结构。
 
+严格模式保留系统提示中的完整 Schema 和 response_format 中的严格约束。
+视觉示例按当前技能调整：有 describe_objects/speak 才展示“描述→播报”；没有 speak
+时只展示单步描述，避免模型将缺失的播报步骤替换成无关动作。其他输出模式保持原提示。
+曾尝试删除正文中的重复 Schema，输入 token 减少约 32%，但六对样本平均耗时
+1.81→3.56 秒，未达到降低耗时的目标，现已撤回精简；保留按可用技能调整示例的修复。
+完整七技能请求恢复为实验前基线。回退后的验证与历史在线记录见 ACCEPTANCE.md。
+
 此前 qwen-flash 的工具模式曾返回坏 JSON，json_object 又把顶层 text 放进 plan；
 这说明只调 tool_choice 或增加格式提示不足以解决故障。最终配置下，9 种视觉问法、
 问候/澄清/不播报 3 个分支均通过；三句原始目标另在真实模型→隔离 Zenoh Runtime→

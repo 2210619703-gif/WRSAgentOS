@@ -1,5 +1,143 @@
 # WRS-Agent V1 验收合同
 
+## 2026-10-14：以响应耗时为目标恢复完整 Schema 提示
+
+用户明确主要目标是减少耗时，要求撤回没有达到该目标的精简。wire.py 恢复在系统
+正文中提供完整 Schema，同时保留“视觉示例只包含当前可用技能”的修复。接口仍为
+json_schema/strict=true，PlanDecision/Runtime 校验、tools/json_object 和 .env
+均未改变。相应更新 test_llm.py 的正文契约断言、执行计划和 voice/README.md。
+
+离线逐字比对：完整七技能系统提示 **10171 字符，与实验前冻结基线完全相同**；
+无 speak/无技能分别为 8988/2279 字符，差异来自保留的单步/缺失能力示例。三种
+上下文的 response_format 都与冻结基线相同。证据：reports/prompt_schema_restore.json。
+
+原六对耗时记录中，精简版两次为 7.23/6.22 秒，拉高平均值至 3.56 秒；旧版均值
+1.81 秒。现有非流式计时未拆开网络、服务排队与生成成本，也未控制缓存，因此未知
+变慢的根因；不能声称省 token 就必然省耗时，或回退后一定恢复到 1.81 秒。
+
+实际验证命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/unit/test_model_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/prompt_schema_restore_offline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers/wire.py tests/unit/test_llm.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+**通过**：325 passed / 0 failed / 0 skipped，23.75 秒；Ruff 和 diff 检查通过。
+版本：Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh 1.9.0、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8；未新增或修改依赖。
+**未验证**：回退后的在线响应时间、缺少技能时真实模型的行为、真实设备；没有阻塞项。
+本次只运行离线和隔离回环测试，新增在线 API 调用 **0**，原账本保持 20/20。
+下一入口：重启 examples/voice/07_start_llm_voice.py 加载恢复后的提示词。
+
+## 2026-10-14：精简严格模式提示词及按可用技能提供视觉示例
+
+本节保留历史实验与失败证据；正文 Schema 去重现已撤回，当前实现以上节为准。
+
+实现：wrs_agent/planner/providers/wire.py 在 json_schema 模式不再把整份 Schema
+追加到系统正文；response_format 的完整 Schema、strict=true、PlanDecision 和
+Runtime 的依赖/结果绑定/资源/权限校验不变。tools/json_object 保持原提示；没有
+添加自动重试、宽松 JSON 修补或执行路径。tests/unit/test_llm.py 新增四种能力组合
+与三种输出模式的请求检查，保留既有坏 JSON、截断、错误工具、权限和依赖拒绝测试。
+
+用户授权本轮 **最多 20 次在线 API 测试，实际 20/20，额度已用完**。固定同一模型
+qwen3.8-flash、openai_chat、json_schema、enable_thinking=false；不改 .env。
+使用既有七技能规划快照（reports/voice_full_request.json），对照时同目标/同上下文/
+同接口 Schema，只替换系统正文。缺少播报节点/全部技能的分支使用删减后的同一快照。
+不读取或上传相机图像、不连接现场节点、不提交动作。每次发送前落账，错误也计数。
+
+在线记录：
+
+- #1–12：六对旧/精简提示，交替请求顺序；视觉观察、播报、桌面物体、问候、歧义、
+  明确禁止播报都通过。输入均值 **6436.17→4365.17 tokens，-32.18%**，每对均少
+  2071；输出均值 61→51.83 tokens，仅是该样本观测，不能保证输出长度总会减少。
+- #13：无 speak 的旧版通过；#14 精简版却生成 describe_objects→set_gripper，
+  #15 加一条禁止替代的规则仍失败，#16 恢复相同旧提示也失败。三次均是语法合法但
+  不符合目标的计划，语义断言拒绝；未执行。旧版同样能失败，因此不能把问题简单
+  归因于去重，也不能依赖接口 Schema 保证计划语义正确。
+- 最终修正：没有 speak 时不给双步骤播报示例，只给 describe_objects 单步示例；
+  没有视觉技能时不展示观察动作示例，并说明缺失能力。完整能力提示仍与 #1–12
+  的精简版逐字一致。#17–20 补测无播报技能、正常视觉、禁止播报、无技能均通过。
+- 总计 **17 次通过、3 次实验失败**；最终版本对应的六份已有结果和四份补测结果
+  共 10 份通过，不能写成“20 次全通过”。所有 20 次均可解析为 PlanDecision，
+  本轮未复现 llm_plan_json_invalid。缺少 speak 的最终版本仅 1 个在线样本。
+
+完整能力系统正文 10171→2361 字符；无 speak 9211→2138；无技能 2597→2043。
+六对完整能力的整次响应平均 **1.81→3.56 秒**，中位数 1.90→2.63 秒；精简版
+样本更慢，未观察到稳定提速。调用是非流式，计时包含网络/排队/生成，缓存和服务
+波动未隔离，不能当作生成吞吐 tokens/s，也不能据小样本判定精简必然更慢。
+供应商报告本轮共 96982 输入、1101 输出 tokens（含对照和失败，不等于费用）。
+
+最终验证命令（固定解释器，经 scripts/run.py 使用项目依赖）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/unit/test_model_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/prompt_dedup_offline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/replay_prompt_dedup.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers/wire.py tests/unit/test_llm.py reports/prompt_dedup_probe.py reports/prompt_dedup_followup.py reports/replay_prompt_dedup.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+**通过**：325 passed / 0 failed / 0 skipped，24.61 秒；Ruff 和 diff 检查通过。
+10 份实际返回离线回放全部通过：独立随机回环 Zenoh、合成相机/检测、Mock TTS；
+验证 SUCCEEDED、观察输出绑定到播报、无播报指令只观察、问候/澄清不执行动作。
+失败的三个计划没有进入回放。离线回放没有追加 API 请求，不播放音频。
+
+在线实际入口：prompt_dedup_probe.py --live-model --through 6，随后 --through 20，
+在 #14 失败时停止；随实验修订的 prompt_dedup_followup.py 依次 --through 15、16、
+17、20，各次发送前计数、失败立即停止。本地 --dry-run 确认接口 Schema 未改变。
+账本保留每次目标、版本、模型 usage、耗时、决策与失败审查；不写凭据、端点或原始
+HTTP。预算限制使现有脚本不能在本轮继续发送。不要将该历史诊断命令当作默认测试。
+初次受限沙箱的 Windows asyncio 初始化挂起，终止该预检后使用许可的隔离外运行；
+所有列出的最终测试命令都实际完成。
+
+证据：reports/prompt_dedup_baseline.json（冻结旧提示/API Schema）、
+prompt_dedup_20.json（完整账本）、prompt_dedup_summary.json（配对统计）、
+prompt_dedup_offline.xml、prompt_dedup_replay.json。当次实验结束时 wire.py SHA256：
+8bf2c55bec0c67841d9d3a4e1d0ef2cfcc97a94c932c2cbd8d9e0f4e53066ada。
+版本：Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh/zenohd 1.9.0、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8、python-dotenv 1.2.4；没有新增依赖。
+
+**未验证/限制**：其他供应商、所有可能指令、真实相机检测质量、扬声器和物理动作；
+没有硬件阻塞项，因为本轮范围为规划与模拟回放。此处通过不代表模型以后不会犯错，
+尤其不能从 Schema 合法推导动作符合用户意图。下一入口：重启 voice/07 使新提示
+生效，维持现有 json_schema 配置，从 09_viewer 正常使用。
+
+## 2026-10-14：模型示例加载仓库 .env
+
+现象：本机根目录 .env 中模型/端点/Key 均已填写，但进程未加载；01_plan 在创建节点
+前以 llm_model_missing 退出。修复 models/01、02 的启动入口，使用显式根路径加载，
+已有环境变量优先；不修改用户配置或核心 from_env 行为。测试使用临时 .env 和受控
+HTTP 夹具，不能读入操作者凭据或启动真实节点。
+
+实际命令：
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.local/uv-cache'
+& '.local/tools/bin/uv.exe' lock --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' export --locked --offline --extra llm --python 'D:/code/venv312/.venv/Scripts/python.exe' --no-emit-project --format requirements-txt --output-file .local/model-example-requirements.txt --quiet
+& '.local/tools/bin/uv.exe' pip install --python 'D:/code/venv312/.venv/Scripts/python.exe' --target .local/deps --require-hashes --no-deps -r .local/model-example-dotenv.txt
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_model_examples.py tests/unit/test_llm.py -q --junitxml=reports/model_example_env.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/models tests/unit/test_model_examples.py
+& '.local/tools/bin/uv.exe' lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+git -c diff.ignoreSubmodules=all diff --check
+```
+
+安装前从工具导出文件中只提取 python-dotenv 的完整条目和哈希，写入
+.local/model-example-dotenv.txt；没有手写锁文件或哈希，没有同步共享 Python。
+首次离线解析因新包尚未缓存失败；沙箱网络访问失败后在外部完成解析/安装。
+原始 diff --check 无法读取受限 submodule 元数据，父仓库忽略 submodule 的检查通过。
+
+**PASS：220 passed in 1.80s，0 failed/skipped**，证据 reports/model_example_env.xml。
+其中新增六项覆盖两个入口的工作目录独立性、带 BOM/引号/JSON 的 .env、显式变量优先、
+导入无副作用、缺根配置不寻找 cwd 文件或默认模型。Ruff、153 包锁一致性、父仓库 diff
+检查通过。Python 3.12.0 / python-dotenv 1.2.4 / httpx 0.28.1 / pytest 9.1.1 /
+Ruff 0.16.8 / uv 0.12.15；指定共享 Python 已有 python-dotenv 1.1.1 未改动。
+
+另以指定 Python 和真实根目录 .env 运行两个入口，使用 unittest.mock 在 asyncio.run
+处关闭主协程并仅调用 LLMConfig.from_env，两个配置均校验通过、Key 存在，不输出值。
+**未运行**：在线模型请求、WRS/硬件执行；本轮不能声称服务端接受当前模型或规划成功。
+下一入口：直接重跑 examples/models/01_plan.py，无需 IDE 额外加载环境文件。
+
 ## 2026-10-14：YOLO 推理同帧标注及显式置信度
 
 修正上轮“检测常滞后，只显示文字”的限制：06 左侧实时 RGB，右侧是 YOLO 推理时

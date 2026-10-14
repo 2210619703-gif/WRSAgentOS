@@ -3,6 +3,8 @@
 import asyncio
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from wrs_agent.planner import ModelPlanner, PlanRequest
 from wrs_agent.planner.providers.llm import LLMClient, LLMConfig, LLMError
 from wrs_agent.processes import LocalStack
@@ -58,4 +60,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    # 不依赖 IDE 的工作目录；显式环境变量优先于仓库 .env。
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False, encoding="utf-8-sig")
     asyncio.run(main())

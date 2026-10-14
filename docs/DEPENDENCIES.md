@@ -1,5 +1,11 @@
 # 依赖与 Git submodule 决策
 
+2026-10-14 模型示例配置：llm extra 与 dev 增加 `python-dotenv>=1.1,<2`，仅用于
+models/01、02 启动入口加载根目录 .env。uv 0.12.15 实际解析 153 包，新增锁定
+python-dotenv 1.2.4（BSD-3-Clause），已有包版本未改变。按 uv 导出的官方 SHA256
+增量安装到 `.local/deps`；指定共享解释器已有的 1.1.1 保持不变，两种环境均验证配置
+加载。默认 core 不增加 dotenv；模型客户端仍只读环境变量，无厂商 SDK 或模型下载。
+
 2026-10-13 用户明确同意非商业研究用途后，已取得 GraspNet 官方 RealSense checkpoint：
 12,468,415 字节，固定 Drive ID 1hd0G8LN6tRpi4742XOTEisbTXNZ-1jmk，模型与许可存于
 .local/models/graspnet。首次本地 SHA256 为

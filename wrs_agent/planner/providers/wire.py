@@ -17,17 +17,8 @@ TOOL_DESCRIPTION = (
     "Propose an answer, clarification or bounded task plan. "
     "Put skill names in plan.steps[].skill; skills are not callable tools."
 )
-PLAN_INSTRUCTIONS = (
-    "Use only the supplied skills and observed objects; never invent coordinates. "
-    "Conversational greetings or general questions that request no observation or action "
-    "use kind=answer and no plan; do not execute speak for a mere greeting. "
-    "Dependencies must be acyclic, and steps sharing a resource must be ordered. "
-    "A step can bind an argument from a preceding step with inputs: "
-    "{argument: {step_id: preceding_step_id, field: output_field}}. "
-    "Declare that dependency in depends_on and omit the bound argument from args. "
-    "Only parameters listed in the skill's result_parameters accept such bindings. "
-    "Questions about currently visible objects require a fresh observation; never invent "
-    "what the camera sees from a snapshot count. When describe_objects and speak are supplied, "
+VISUAL_PLAN_INSTRUCTIONS = (
+    "When describe_objects and speak are supplied, "
     "answer such questions by proposing this two-step plan, including for '桌子上有哪些物体？': "
     '{"kind": "execute",\n'
     ' "plan": {"steps": [\n'
@@ -38,6 +29,19 @@ PLAN_INSTRUCTIONS = (
     ' "text": ""\n'
     '}\n'
     "If the user explicitly asks not to speak, omit the speak step and only describe. "
+)
+PLAN_INSTRUCTIONS = (
+    "Use only the supplied skills and observed objects; never invent coordinates. "
+    "Conversational greetings or general questions that request no observation or action "
+    "use kind=answer and no plan; do not execute speak for a mere greeting. "
+    "Dependencies must be acyclic, and steps sharing a resource must be ordered. "
+    "A step can bind an argument from a preceding step with inputs: "
+    "{argument: {step_id: preceding_step_id, field: output_field}}. "
+    "Declare that dependency in depends_on and omit the bound argument from args. "
+    "Only parameters listed in the skill's result_parameters accept such bindings. "
+    "Questions about currently visible objects require a fresh observation; never invent "
+    "what the camera sees from a snapshot count. "
+    + VISUAL_PLAN_INSTRUCTIONS +
     # Skills list their resources, and weaker models copy them into steps as new fields.
     "Steps contain only the fields in the decision schema; skills already declare "
     "their resources, so never add resources, notes or other fields to a step. "
@@ -66,6 +70,26 @@ SYSTEM_PROMPT = (
 
 def json_prompt(schema: dict | None = None) -> str:
     """Same decision rules, with an explicit JSON content channel instead of tool arguments."""
+    instructions = PLAN_INSTRUCTIONS
+    if schema is not None:
+        variants = schema.get("$defs", {}).get("Step", {}).get("anyOf", [])
+        offered = {step["properties"]["skill"]["const"] for step in variants}
+        # Even the old prompt sometimes copied its speech example when speak was absent,
+        # replacing that step with a schema-valid but unrelated actuator skill. Examples
+        # must use the same available capabilities as the strict service-side contract.
+        if not {"describe_objects", "speak"} <= offered:
+            visual = (
+                "For visible-object questions, only describe_objects is available for this "
+                "flow. Propose one observation step, without speech or manipulation: "
+                '{"kind":"execute","plan":{"steps":[{"step_id":"see",'
+                '"skill":"describe_objects","args":{}}]},"text":""}. '
+                if "describe_objects" in offered else
+                "If no supplied skill can obtain a fresh visual observation, explain that "
+                "limitation and ask for the missing capability; never substitute manipulation. "
+            )
+            instructions = instructions.replace(VISUAL_PLAN_INSTRUCTIONS, visual)
+    # Keep the original textual schema: removing it saved input tokens but did not
+    # improve measured latency. The service-side strict contract remains unchanged.
     return (
         "You propose plans for WRS-Agent. You cannot execute actions. "
         "Return ONE complete JSON decision object in message content, without Markdown, "
@@ -75,7 +99,7 @@ def json_prompt(schema: dict | None = None) -> str:
         "a proposal tool. "
         "Use kind=execute with plan.steps for actions, kind=answer with text for answers, "
         "or kind=clarify with text for a question. Omit plan for answer and clarify. "
-        + PLAN_INSTRUCTIONS + " Decision JSON schema: "
+        + instructions + " Decision JSON schema: "
         + encode_for_model(tool_schema() if schema is None else schema)
     )
 
