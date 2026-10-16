@@ -26,6 +26,7 @@ class QueryFixture:
         self.callback = None
         self.before_reply = self.before_initial_reply = None
         self.queries = 0
+        self.presence_queries = 0
         self.closed, self.unsubscribed = [], False
 
     def key(self, suffix):
@@ -49,6 +50,7 @@ class QueryFixture:
         )
 
     def get(self, key, handler, *, timeout, cancellation_token):
+        self.presence_queries += 1
         history = self.live.copy()
         if self.before_initial_reply:
             self.before_initial_reply()
@@ -194,6 +196,78 @@ async def test_initial_query_cannot_revive_a_concurrent_departure(network):
     assert bus.queries == 0
 
 
+async def test_refresh_reconciles_missed_presence_events_with_a_bounded_frequency(network):
+    bus = network(speaker())
+    view = registry(bus)
+    await view.refresh()
+    assert bus.presence_queries == 1
+    # The router has the token, but this long-lived subscriber missed its notification.
+    bus.infos["late"] = speaker(node_id="late", target="room-late", skills={})
+    bus.live.add(("late", "room-late", "first"))
+    assert "late" not in await view.refresh()
+    assert bus.presence_queries == 1
+    view._last_presence = float("-inf")
+    assert (await view.refresh())["late"]["ready"]
+    assert bus.presence_queries == 2
+
+    # Missed departures and replacements must also be reconciled, not just arrivals.
+    bus.live.remove(("speaker", "room", "first"))
+    bus.live.add(("speaker", "room", "next"))
+    bus.info = speaker("next")
+    view._last_presence = float("-inf")
+    assert (await view.refresh())["speaker"]["boot_id"] == "next"
+    with pytest.raises(ValueError, match="node_instance_changed"):
+        view.check_instance("speaker", "first")
+    assert bus.presence_queries == 3
+
+
+async def test_presence_resync_keeps_live_view_and_does_not_revive_a_departure(network):
+    bus = network(speaker())
+    view = registry(bus)
+    await view.refresh()
+
+    def concurrent_change():
+        view.check_instance("speaker", "first")  # Not temporarily offline during get().
+        bus.emit("first", False)
+        with pytest.raises(ValueError, match="node_unavailable"):
+            view.check_instance("speaker", "first")
+
+    bus.before_initial_reply = concurrent_change
+    view._last_presence = float("-inf")
+    assert (await view.refresh())["speaker"]["health"] == "offline"
+
+
+async def test_cancelled_presence_resync_preserves_view_and_can_retry(network):
+    bus = network(speaker())
+    view = registry(bus)
+    await view.refresh()
+    original_get = bus.get
+    entered = asyncio.Event()
+    callbacks = []
+
+    def pending_get(key, handler, **kwargs):
+        callbacks.append(handler)
+        entered.set()
+
+    bus.get = pending_get
+    view._last_presence = float("-inf")
+    pending = asyncio.create_task(view.refresh())
+    await entered.wait()
+    view.check_instance("speaker", "first")
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert view._queried is None
+    view.check_instance("speaker", "first")
+    bus.get = original_get
+    bus.live.clear()
+    # An old, cancelled query's late reply must not contaminate the new snapshot.
+    bus.before_initial_reply = lambda: callbacks[0].callback(
+        SimpleNamespace(ok=bus.sample(("speaker", "room", "first"))),
+    )
+    assert (await view.refresh())["speaker"]["health"] == "offline"
+
+
 async def test_unknown_node_arrives_and_its_address_is_queried_without_bindings(network):
     bus = network()
     view = NodeRegistry(bus)
@@ -325,13 +399,14 @@ async def test_unverified_descriptor_retries_one_timeout_on_borrowed_or_new_conn
 
     async def delayed_request(key, payload, *, timeout):  # noqa: ASYNC109 - query fixture
         attempts.append((key, timeout))
-        if len(attempts) == 1:
+        # A route that needs 0.7 s cannot fit in two consecutive 0.3 s query windows.
+        if timeout < .7:
             raise TimeoutError
         return await original_request(key, payload, timeout=timeout)
 
     bus.request = delayed_request
     assert (await view.refresh())["speaker"]["ready"]
-    assert attempts == [("request/node/speaker", 0.3)] * 2
+    assert attempts == [("request/node/speaker", 0.3), ("request/node/speaker", 2.0)]
 
     async def unavailable(*args, **kwargs):
         attempts.append((args[0], kwargs["timeout"]))

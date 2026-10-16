@@ -1,6 +1,1390 @@
 # WRS-Agent V1 验收合同
 
+## 2026-10-14：任务 3e10ae75 的 ROI 判断审计
+
+只读日志：target=cup，locate/segment 同一 observation_id，infer_grasps 使用正确
+segment_id；原分割缓存返回 artifact_expired，不能重放。旧错误缺少中间计数，不能
+由 no_grasp_in_target_roi 断言分割、坐标系或索引错误。证据 grasp_roi_3e10ae75.json。
+
+对现有正式权重和官方保存 RGB-D 文件做独立验证：sa1_inds[sa2_inds] 与 fp2_inds
+一致；全部 1024 个种子 XYZ 对应采样点；解码中心对应 objectness 筛选后的种子。
+用原始相机内参直接将解码中心投影回像素，不依赖采样索引，逐项核对 ROI 归属。
+香蕉 mask：13865 像素→332 采样点→17 种子→10 ROI 候选，全场景 217 候选；
+64 像素小区域：0 采样点；256 像素小区域：5 采样点、0 种子；背景区域：95 采样点、
+3 种子，全部被 objectness 判为背景。四类结果均与独立投影完全一致。
+这验证了保存样例的索引判断，不能代替过期杯子帧的现场诊断。
+
+生产改动仅将无 ROI 候选区分 grasp_roi_not_sampled / grasp_roi_no_seed /
+grasp_roi_rejected_as_background，在 ErrorInfo.message 中附加 ROI 采样点、种子、
+场景候选及 ROI 候选数量；不保留额外图像/GPU 张量，不扩大 mask，不改变采样或阈值。
+旧错误码继续识别，未知异常仍只显示固定解释。更新后重启 grasping/04 即加载诊断。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py reports/audit_grasp_roi_task.py
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 reports/audit_grasp_roi_indices.py
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/unit/test_grasp_preview.py -q --tb=short --junitxml=reports/grasp_roi_audit_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_roi_audit_integration.xml
+$env:OPENBLAS_NUM_THREADS = '1' # 仅复测进程，减少并行 BLAS 初始化的内存开销
+& $P -X utf8 -S scripts/run.py -m pytest 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[sam3]' 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[segmentation]' -q --tb=short --junitxml=reports/grasp_roi_audit_integration_retry.xml
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/grasp/graspnet.py wrs_agent/errors.py tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py reports/audit_grasp_roi_indices.py reports/audit_grasp_roi_task.py
+```
+
+61 单元通过（1.08s），包括三类真实筛选错误经节点处理、Runtime、SQLite 和 Viewer
+文案保留原始阶段计数；未知错误仍不泄露路径。真实权重离线投影审计四类均通过；
+Torch 2.9.0+cu128、NumPy 2.5.3、RTX 5060 Laptop，源码及权重哈希见
+reports/grasp_roi_index_audit.json。Ruff 首次诊断脚本导入排序/长行失败，修正后通过。
+集成首次 2 passed / 2 failed（52.88s）：sam3 / segmentation 变体在节点发现超时，
+两组 camera / graspnet 夹具日志均记录 OpenBLAS 内存分配失败，未进入 ROI 筛选。
+原失败报告及 .local/runs/mock-0d563b33294a、mock-f3786ce6cfcf 日志保留。
+仅复测进程设 OPENBLAS_NUM_THREADS=1 后，两项均通过（31.14s）；合计四项集成均有
+通过证据，未放宽测试超时或修改生产配置。git diff --check 通过。
+未安装/下载任何依赖，未启动相机/机器人或在线付费模型；未重启用户节点。
+
+## 2026-10-14：任务 4326e422 的抓取数量与过期提示
+
+现场只读日志确认 infer_grasps 成功，候选 ID 75a1acb06c7748029a716298d1d6cd41，
+count=1；同帧定位和分割均成功。已有 GraspNet latest 与 Viewer 三次查询均返回
+artifact_expired。现有数据按原观测时间保留 30 秒；事后证据不能还原首次切标签的
+瞬时状态。命令 `scripts/run.py reports/diagnose_grasp_display.py`，报告
+reports/grasp_display_4326e422.json；没有提交动作、运行模型或重新采集相机数据。
+
+修改 Runtime overview/任务状态仅增加深拷贝的 step_outputs；不改变调度或权限。
+09 的“结果”显示成功动作生成的候选数量，旧 Agent 缺字段时明确提示；更换任务不
+显示上一任务数量。camera/panel.js 显示过期/失效/未连接等原因及机器码，ready 状态
+显示有效期剩余时间；preview.py 提供倒计时，区分无效抓取数据错误。保留原有 TTL、
+单份缓存及过期/取消时 CPU/GPU 资源清理；已释放的现场点云无法恢复。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/unit/test_step_outputs.py tests/unit/test_runtime.py tests/unit/test_camera.py -q --tb=short --junitxml=reports/grasp_display_unit_final.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_display_integration.xml
+node reports/check_grasp_cloud_browser.cjs
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/runtime.py wrs_agent/nodes/camera/preview.py examples/voice/09_viewer.py tests/unit/test_step_outputs.py tests/unit/test_grasp_preview.py tests/integration/test_grasp_pipeline.py
+```
+
+88 单元通过（3.94s）；首次 87 passed/1 failed 是单元环境未安装可选 websockets，
+测试隔离 HTTP 响应对象边界后通过，原输出保留。4 Zenoh 集成通过，使用显式离线
+模型/相机夹具验证 count=1、同帧数据、缓存替换与取消。Chrome 155.0.8059.41 实际
+WRS/WebGPU 验证单个候选、显示 1/1、剩余时间、artifact_expired 文案；8192 点含
+4096 目标点，5 次替换始终 18 个覆盖层 GPU 缓冲，旧缓冲全部 destroy，过期及切换
+后清空，保留原机器人模型，浏览器/GPU 错误为零。报告 grasp_display_browser.json；
+截图 grasp_display_expired.png 和 grasp_cloud_highlight.png 为合成验证，不是用户实景。
+Ruff 通过；未安装依赖，沿用 Python 3.12.0 / pytest 9.1.1 / Ruff 0.16.8 等当前环境。
+未自动重启用户节点、调用付费模型或驱动硬件。入口：重启 voice/07 和 09 后新任务查看。
+
+## 2026-10-14：完整场景 GraspNet 推理后筛选分割 ROI
+
+grasp/graspnet.py 改为完整有效场景采样 20000 点，保留原始像素的 ROI 归属；依据固定
+baseline 的 fp2_inds 和 objectness 顺序筛选解码候选，并校验中心坐标一致。目标 ROI
+筛选在夹爪宽度/前 32 项排序之前。移除旧 sample_target，检查脚本改为完整场景采样；
+ROI 无候选以 no_grasp_in_target_roi 经过节点、Runtime、日志和 Viewer 透传。原有
+同帧数据、取消/过期校验、最新单份缓存和 Viewer 高亮保持不变，不新增历史点云副本。
+
+实际命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/unit/test_grasp_preview.py -q --tb=short --junitxml=reports/grasp_scene_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py -q --tb=short --junitxml=reports/grasp_scene_integration.xml
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 reports/check_full_scene_graspnet.py
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/grasp/graspnet.py wrs_agent/errors.py scripts/check_box_segmentation.py tests/unit/test_grasp_scene.py tests/unit/test_grasp_perception.py tests/fixtures/grasp_perception_node.py reports/check_full_scene_graspnet.py
+```
+
+50 单元、4 集成通过，0 failed/skipped；集成 42.88s，使用实际 Zenoh 与显式合成
+相机/模型夹具，验证 SAM3、FastSAM、YOLO 框链路以及替换/取消时旧数据失效。
+最初沙箱单元完成前 25 项后停滞，已中断，沙箱外执行通过；一次 Ruff 长行已修正。
+真实模型离线检查：Python 3.12.0、Torch 2.9.0+cu128、NumPy 2.5.3、RTX 5060 Laptop，
+固定现有源码/权重及同一香蕉样例；采样包含 332 个目标点和 19668 个背景点。
+217 个解码候选中 ROI 精确保留 10 个，开口 .05057–.08598m，默认 .05m 全部拒绝，
+保留 no_grasp_within_gripper_width。单独虚拟 .1m 诊断验证成功返回这 10 项，不修改
+生产配置；该脚本首次读取 GraspCandidate 时误用字典下标，修正后完整复验通过。
+预热后 5 次约 98.47–124.93ms，中位数 106.85ms，含完整场景采样/传输到 GPU/解码/ROI
+及宽度筛选，不含 Camera/FastSAM/Zenoh/Planner/碰撞。报告 grasp_full_scene_20261014.json。
+Ruff 通过；没有增加依赖或下载，没有启动相机/机器人/在线模型。完整场景输入仍不能
+代替碰撞检查，collision_checked=false；D405 现场质量和物理抓取仍 unverified。
+使用入口：重启 04_start_graspnet.py 后提交新任务，旧结果不自动重算。
+
+## 2026-10-14：GraspNet 输入审计与正式权重离线测时
+
+代码核对：GraspNetNode 接收同帧完整点云，但 GraspNetPredictor.sample_target 仅从
+分割目标抽取 20000 点送网络；当前没有场景点云碰撞过滤，collision_checked=false。
+FastSAM 示例默认 fastsam-box：YOLO 定位框经 location_id 绑定同帧 RGB，FastSAM
+先整图分割，再按掩码外接框和定位框的 IoU 选目标；没有 CLIP 文本匹配或 ROI 裁剪。
+本次仅审计和离线测时，没有修改生产推理流程。
+
+实际命令：`.local/venvs/graspnet/Scripts/python.exe -X utf8 reports/measure_graspnet_latency.py`。
+首次沙箱读取权重 Path.resolve 被 WinError 5 拒绝；相同脚本在沙箱外完成有限离线测试，
+未访问设备、网络或下载资源。Python 3.12.0、Torch 2.9.0+cu128、NumPy 2.5.3，
+RTX 5060 Laptop，使用已核验的 checkpoint-rs.tar 和保存的官方香蕉 RGB-D 样例。
+输入 720×1280，825160 个有效场景点、13865 个目标点，网络均采样 20000 点。
+模型构造/加载 0.335s（不含进程启动与顶层导入）；首次 infer 1.021s；另预热一次后，
+5 次目标输入 73.13–81.35ms，中位数 77.04ms。将完整场景作为采样范围的对照预热后
+5 次 101.81–106.49ms，中位数 103.34ms；这是耗时对照，未按目标筛选候选或检查碰撞。
+计时使用 CUDA 同步，包含采样、上传、前向、解码、回传及候选构造；不含相机、分割、
+Zenoh、Planner 或碰撞过滤。未验证 D405 联合运行、并发负载、物理碰撞或抓取质量。
+早期 graspnet_trained.json 的 0.405s 属于随机初始化网络，不能作为正式权重延迟。
+证据：reports/graspnet_latency_20261014.json；真实模型测时通过，不等同物理抓取验收。
+
+## 2026-10-14：抓取候选同帧点云与分割高亮
+
+修改文件：camera/preview.py 使用候选自带的 SegmentData，背景保留原始 RGB，目标点
+标为粉紫色；两组采样合计不超过 8192 点，小目标单独分配预算，无效 XYZ 被过滤。
+panel.js 显示图例和采样目标点数；grasp/node.py 只缓存一份结果，新推理开始即调用
+ArtifactCache.clear() 释放旧观测引用，旧 candidate_set_id 不可再读取；技能说明与文档
+同步这一生命周期。预览更换候选前丢旧 CPU 数据，读取/编码后重新核对候选、任务和
+观测编号，防止取消/替换期间的迟到结果恢复。没有修改相机/YOLO/推理频率。
+scene.js 原有清理会删除模型并 destroy 自有几何缓冲，此轮新增独立回归和实际 GPU 验证。
+
+命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/unit/test_segmentation_preview.py tests/unit/test_camera.py -q --tb=short --junitxml=reports/grasp_cloud_unit.xml
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py tests/integration/test_camera_viewer.py -q --tb=short --junitxml=reports/grasp_cloud_integration.xml
+& $P -X utf8 -S scripts/run.py -m pytest 'tests/integration/test_grasp_pipeline.py::test_same_frame_pipeline_ambiguity_and_late_cancel[sam3]' -q --tb=short --junitxml=reports/grasp_cloud_sam3_retry.xml
+node tests/unit/camera_scene.mjs
+node reports/check_grasp_cloud_browser.cjs
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/camera/preview.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/vision/artifacts.py wrs_agent/skills/vision/grasping.py tests/unit/test_grasp_preview.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py
+```
+
+结果：64 单元通过（1.76s）；集成首次 5 passed、1 failed（67.64s），失败发生在相机
+夹具启动，`.local/runs/mock-bdac09d619ec/camera.log` 记录 OpenBLAS 内存分配失败，
+不是着色/推理断言失败。未改代码或放宽时限，单独复测 1 passed（13.60s），保留两份报告。
+全部 6 项集成有通过证据，无跳过；涵盖 SAM3/FastSAM/框分割链、旧编号过期与 WRS 页面。
+Node.js 200 次替换后自有缓冲数量固定，旧缓冲逐个验证 destroy，重复 clear 和 scene_init
+恢复通过。Chrome 155.0.8059.41 实际 WRS WebGPU 页面验证：8192 点（目标 4096）、
+3 个候选；5 次替换始终 34 个覆盖层 GPU 缓冲，旧缓冲全部 destroy；标签切换、过期后
+覆盖层清空，原机器人场景保留，浏览器及 GPU 错误数 0。Ruff、所改文件 diff --check 通过。
+证据 `reports/grasp_cloud_browser.json`，截图 `reports/grasp_cloud_highlight.png`。
+
+依赖实读：Python 3.12.0、NumPy 2.5.3、Pillow 12.3.0、Zenoh 1.9.0、Pydantic 2.13.5、
+pytest 9.1.1、Ruff 0.16.8（reports/grasp_cloud_versions.json）。未安装或下载依赖/权重。
+所有图像与模型为显式合成夹具，D405 现场与真实模型未重跑；未连接/驱动真实机器人，
+未调用在线模型或重启用户进程。下一入口：重启 grasping/04_start_graspnet.py 和
+voice/09_viewer.py，刷新页面，重新生成抓取后选择“点云 → 抓取候选”。
+
+## 2026-10-14：视觉技能发现恢复与规划失败诊断
+
+现场只读证据 `reports/visual_description_live.json`：同环境新客户端发现 9 个节点，
+Agent 自己的 request/nodes 只有 tts/wrs/agent；YOLO 查询的一次结果非空。
+“当前视野中没有可见物体”是 Planner 的 ANSWER，并无 describe_objects 动作。
+46c2b0b0 的独立任务记录 SUCCEEDED，总览 FAILED 是后续规划错误覆盖旧 execution.state。
+没有原失败计划，具体错误引用未确认；observe.output=null 无法绑定 text 已离线复现。
+
+修改：registry.py 在 refresh 时每两秒至多重新核对一次在线名单，合并查询期间实时事件，
+保留原有实例/地址/容量保护；runtime.py 不让新规划回复/失败覆盖旧任务状态，新增
+planning_reason；09_viewer 使用该字段；plan_validation.py 的 incompatible_step_output
+显示源步骤/字段/技能与目标参数及原因；robot 技能说明和 wire.py 提示词明确 observe
+不检测相机，output=null 不能绑定输出，空场景不能推出空画面。未改 YOLO 模型/阈值/FPS。
+
+真实命令（P 为 `D:/code/venv312/.venv/Scripts/python.exe`）：
+
+```powershell
+& $P -X utf8 -S scripts/run.py -m pytest tests/unit/test_registry.py tests/unit/test_revision_regressions.py tests/unit/test_step_outputs.py tests/unit/test_runtime.py tests/unit/test_llm.py -q --tb=short
+& $P -X utf8 -S scripts/run.py -m pytest tests/integration/test_dynamic_nodes.py tests/integration/test_dynamic_system.py tests/integration/test_skill_discovery.py tests/integration/test_vision_speech.py tests/integration/test_grasp_pipeline.py -q --tb=short
+& $P -X utf8 -S scripts/run.py -m ruff check wrs_agent/registry.py wrs_agent/runtime.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/robot/definitions.py examples/voice/09_viewer.py tests/unit/test_registry.py tests/unit/test_revision_regressions.py tests/unit/test_step_outputs.py tests/integration/test_dynamic_nodes.py
+```
+
+结果：302 passed / 6.88s；21 passed / 85.83s；Ruff 通过，0 failed / 0 skipped。
+所改文件 git diff --check 通过。依赖实读：Python 3.12.0、eclipse-zenoh 1.9.0、
+Pydantic 2.13.5、pytest 9.1.1、Ruff 0.16.8；报告 reports/visual_diagnosis_versions.json。
+最终审查补上查询身份隔离：取消的旧查询迟到回复不能写入新查询的临时名单。
+复测 `pytest tests/unit/test_registry.py tests/integration/test_dynamic_nodes.py::test_existing_agent_and_client_accept_an_unlisted_late_node -q --tb=short`：33 passed / 5.25s（重复项，不另计总数）。
+集成输出 `reports/visual_discovery_integration.txt`。真实 Zenoh 测试覆盖正常晚到节点，及
+故意丢弃 Agent 实时通知后仍靠在线查询恢复；模型/相机/播报/抓取是显式离线夹具。
+现场通知缺失的底层原因和修复后真实云模型选技能仍 unverified；没有付费调用或硬件操作，
+没有重启用户运行进程。使用更新需重启 07_start_llm_voice.py 和 09_viewer.py。
+
+## 2026-10-14：分割上游超时与 SAM 掩码显示
+
+任务 `8f6f4d9b` 的定位成功，segment_region 日志 reason 为
+`request_timeout: No response was received within the request deadline.`，输出为空。
+结合当时异常类型和代码路径指向上游发现查询，FastSAM 尚未开始推理；后续 GraspNet
+BLOCKED 是依赖失败。旧分割节点把结构化异常转为字符串，Executor 再退回 action_failed。
+现场只读探针：新连接对 YOLO/FastSAM 连续两次 0.3 秒描述查询均超时，接着 2 秒窗口
+成功读到 ready。这个模式与初次连接/路由准备延迟相符，不据此断言模型或点云故障。
+证据：reports/segmentation_failure_diagnosis.json；仅描述、日志查询，不读取设备帧。
+
+修改文件：registry.py 仅对尚未验证的实例，将原有唯一一次描述读取重试放宽到 2 秒；
+保留前后启动身份/地址检查和已知实例的快速失败，不重试任何动作。segmentation/node.py、
+fastsam.py 和 errors.py 分类上游超时、掩码不匹配/歧义、网格不符、显存不足等错误，
+保留节点及阶段且不公开未知异常原文。最新成功分割接口复用原 ArtifactCache，不新增
+历史图像仓库、不续期；data.py 增加只读 LatestSegment 引用合同。
+camera/preview.py、panel.js 和 voice/09 增加「分割」标签：按需 2 Hz 查询元数据，
+新编号只取一次同帧数据、画绿色掩码与橙色定位框；失败/取消/过期/替换后清除旧图。
+绘制期间再次核对引用，避免撤销结果重新显示。查看不调用相机最新帧或任何推理技能。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_segmentation_failure.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_segmentation_discovery.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_segmentation_preview.py tests/unit/test_registry.py tests/unit/test_fastsam.py tests/unit/test_grasp_perception.py tests/unit/test_locations.py tests/unit/test_camera.py -q --junitxml=reports/segmentation_preview_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_grasp_pipeline.py tests/integration/test_camera_viewer.py tests/integration/test_dynamic_nodes.py tests/unit/test_errors_and_versions.py tests/unit/test_step_outputs.py -q --junitxml=reports/segmentation_preview_integration.xml
+node reports/check_segmentation_browser.cjs
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/registry.py wrs_agent/errors.py wrs_agent/nodes/segmentation wrs_agent/nodes/camera/preview.py examples/voice/09_viewer.py tests/unit/test_registry.py tests/unit/test_segmentation_preview.py tests/integration/test_grasp_pipeline.py
+git -c diff.ignoreSubmodules=all diff --check -- wrs_agent/registry.py wrs_agent/errors.py wrs_agent/nodes/segmentation wrs_agent/nodes/camera/preview.py wrs_agent/nodes/camera/panel.js examples/voice/09_viewer.py examples/voice/README.md tests/unit/test_registry.py tests/unit/test_segmentation_preview.py tests/integration/test_grasp_pipeline.py docs/ACCEPTANCE.md
+```
+
+**通过**：105 passed in 2.03s + 52 passed in 84.37s，总计 157 / 0 failed / 0 skipped；
+Ruff 通过。集成使用真实 Zenoh、模型替身及 WRS 虚拟页面。新逻辑现场只读发现耗时
+2.437 秒，YOLO/FastSAM 均 ready，见 reports/segmentation_discovery_fixed.json。
+Chrome 155.0.8059.41 实际 WebGPU 页面验证分割叠加、标签切换、失效清除、原 13 个
+机器人模型保留，JS 异常为 0；见 reports/segmentation_scene_browser.json 和
+reports/segmentation_overlay.png。首轮浏览器探针未等机器人场景加载便取基线 0，
+导致比较失败；修正探针等待后重跑通过，不把它记成产品失败或隐藏首次结果。
+
+依赖沿用上一节 Python 3.12.0、Pydantic 2.13.5、Zenoh 1.9.0、NumPy 2.5.3、
+pytest 9.1.1、Ruff 0.16.8；没有安装、下载或修改锁文件。
+**未验证**：现场 D405/FastSAM 真实杯子分割与完整 GPU 抓姿流程；本轮没有重新提交任务、
+在线模型调用、设备启动或机器人动作。浏览器截图明确为合成测试数据，不是本次杯子结果。
+下一入口：重启 02/03/04、voice/07 和 09，刷新页面，完成分割后点「分割」；失败则
+检查新的具体错误。旧失败记录不重写、不自动恢复执行。
+
+## 2026-10-14：抓姿失败诊断、结构化错误与结果类型校验
+
+只读 `examples/grasping/.local/state` 的动作日志，定位任务
+`4d9622b94562436f85c0142de20d8860`：定位成功，GraspNet 收到的 segment_id 与该步
+location_id 完全相同，计划漏掉分割；实际失败 reason 是 node_unavailable，在访问
+segmentation 时发生，尚未调用点云推理。只读查询 7451 / voice-goal 的节点目录同样
+没有 segmentation。证据 `reports/grasp_failure_diagnosis.json` 同时保存相关动作和
+当前节点/任务状态；未查询帧、提交动作、改变现场任务或重启节点。
+
+修改：grasping 技能参数/输出的 JSON Schema 用 x-wrs-artifact 标明定位、分割、
+抓姿候选编号；plan_validation 在动作下发前校验语义种类，wire 生成厂商严格 Schema
+时去掉该扩展注解，普通文本输出绑定不变。没有新增提示词、自动重试或模型调用。
+SkillFailure/Executor 保留明确 ErrorInfo；GraspNet 区分分割不可达、结果失效、
+有效点不足、无适用开口候选、无效模型输出、显存不足等失败，不公开未知异常原文。
+09 显示错误码、来源和安全说明；补充 voice README 的正确链路、故障及重启说明。
+测试覆盖消息/日志/界面传递、整计划执行前拒绝、两种合法分割路径及真实 Zenoh 合同。
+
+实际命令（从仓库根目录）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_live_grasp_failure.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py -q --junitxml=reports/grasp_failure_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_environment.py tests/unit/test_runtime.py tests/unit/test_revision_regressions.py tests/unit/test_llm.py tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py tests/integration/test_vision_speech.py -q --junitxml=reports/grasp_failure_regression.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/errors.py wrs_agent/executor.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/vision/grasping.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/grasp/graspnet.py examples/voice/09_viewer.py tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py
+git -c diff.ignoreSubmodules=all diff --check -- wrs_agent/errors.py wrs_agent/executor.py wrs_agent/plan_validation.py wrs_agent/planner/providers/wire.py wrs_agent/skills/vision/grasping.py wrs_agent/nodes/grasp/node.py wrs_agent/nodes/grasp/graspnet.py examples/voice/09_viewer.py examples/voice/README.md tests/unit/test_grasp_result_bindings.py tests/unit/test_grasp_perception.py tests/integration/test_grasp_pipeline.py docs/ACCEPTANCE.md
+```
+
+**通过**：70 passed in 3.18s；274 passed in 139.32s，总计 344 passed / 0 failed /
+0 skipped。后者使用真实 Zenoh、隔离回环模型替身及 WRS 虚拟场景，包括取消和 UNKNOWN
+语义回归；不代表真实模型或设备验证。Ruff 和所改文件的 diff 空白检查通过。
+首次单元命令在受限沙箱内无输出
+挂起，核对命令行后仅结束本轮测试进程，在沙箱外重跑通过；没有停止任何业务节点。
+Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh 1.9.0、NumPy 2.5.3、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8；本次不改依赖或锁文件。
+
+**未验证**：修改后的 D405/FastSAM/GraspNet 联合实测和真实 GPU 故障；没有模型付费
+调用或真实机器人动作。原失败记录保留，不补写成新错误或自动重试。
+下一入口：启动同环境的 03 FastSAM；重启 02/03/04、voice/07、09，发布新技能合同并
+加载校验/错误显示。确认相机及模型节点的 ENDPOINT、ENV_ID、SESSION 与 09 一致。
+
+## 2026-10-14：GraspNet 启动依赖检查与通用错误提示
+
+04 原先使用共享解释器启动时，缺少 pointnet2._ext，异常发生在建立节点后的模型
+导入阶段。项目 GraspNet 环境已有两个编译扩展。本次修改 04、grasping README 和
+test_grasping_example；本机 .idea 的 04 运行配置单独选择该环境，不改变其他配置。
+检查在创建节点/读取会话口令前执行；按用户要求，错误中不出现当前解释器或本机
+绝对路径，只给出缺失模块、通用环境说明及项目文档入口。
+
+实际验证命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasping_example.py tests/unit/test_grasp_perception.py -q --junitxml=reports/graspnet_startup_unit.xml
+& '.local/venvs/graspnet/Scripts/python.exe' -X utf8 -m reports.check_graspnet_startup
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -m examples.grasping.04_start_graspnet
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/grasping/04_start_graspnet.py tests/unit/test_grasping_example.py
+git -c diff.ignoreSubmodules=all diff --check -- examples/grasping/04_start_graspnet.py examples/grasping/README.md tests/unit/test_grasping_example.py docs/ACCEPTANCE.md docs/DEPENDENCIES.md
+```
+
+最终 **32 passed in 0.68s，0 failed/skipped**；Ruff 和本次文件 diff 检查通过。
+共享环境实际运行按预期退出 1，仅显示通用说明；没有创建节点或发出请求。
+专用环境真实验证：Torch 2.9.0+cu128、NumPy 2.5.3、原生扩展 0.1.0，固定训练权重
+加载并在独立工作线程推理已有 RGB-D 目标点云，返回 32 个候选。证据为
+reports/graspnet_startup_environment.json；不把保存数据推理记作相机或抓取实测。
+Python 3.12.0；无需新增依赖、下载或重新编译，现有上游 torch.cross 弃用警告保留。
+
+初次真实探针受沙箱文件权限限制；改在外部运行。探针按文件执行时找不到 examples，
+改从根目录以 -m 运行后通过。首次 Ruff 行宽问题已修复；全仓 diff 检查发现其他正在
+修改的 00_start_router.py 行尾空格，未改动该文件，本次仅报告所改文件检查结果。
+**未验证**：常驻节点联合运行、D405 实际输入及机器人执行。本轮未启动设备或在线模型。
+
+## 2026-10-14：以响应耗时为目标恢复完整 Schema 提示
+
+用户明确主要目标是减少耗时，要求撤回没有达到该目标的精简。wire.py 恢复在系统
+正文中提供完整 Schema，同时保留“视觉示例只包含当前可用技能”的修复。接口仍为
+json_schema/strict=true，PlanDecision/Runtime 校验、tools/json_object 和 .env
+均未改变。相应更新 test_llm.py 的正文契约断言、执行计划和 voice/README.md。
+
+离线逐字比对：完整七技能系统提示 **10171 字符，与实验前冻结基线完全相同**；
+无 speak/无技能分别为 8988/2279 字符，差异来自保留的单步/缺失能力示例。三种
+上下文的 response_format 都与冻结基线相同。证据：reports/prompt_schema_restore.json。
+
+原六对耗时记录中，精简版两次为 7.23/6.22 秒，拉高平均值至 3.56 秒；旧版均值
+1.81 秒。现有非流式计时未拆开网络、服务排队与生成成本，也未控制缓存，因此未知
+变慢的根因；不能声称省 token 就必然省耗时，或回退后一定恢复到 1.81 秒。
+
+实际验证命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/unit/test_model_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/prompt_schema_restore_offline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers/wire.py tests/unit/test_llm.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+**通过**：325 passed / 0 failed / 0 skipped，23.75 秒；Ruff 和 diff 检查通过。
+版本：Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh 1.9.0、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8；未新增或修改依赖。
+**未验证**：回退后的在线响应时间、缺少技能时真实模型的行为、真实设备；没有阻塞项。
+本次只运行离线和隔离回环测试，新增在线 API 调用 **0**，原账本保持 20/20。
+下一入口：重启 examples/voice/07_start_llm_voice.py 加载恢复后的提示词。
+
+## 2026-10-14：精简严格模式提示词及按可用技能提供视觉示例
+
+本节保留历史实验与失败证据；正文 Schema 去重现已撤回，当前实现以上节为准。
+
+实现：wrs_agent/planner/providers/wire.py 在 json_schema 模式不再把整份 Schema
+追加到系统正文；response_format 的完整 Schema、strict=true、PlanDecision 和
+Runtime 的依赖/结果绑定/资源/权限校验不变。tools/json_object 保持原提示；没有
+添加自动重试、宽松 JSON 修补或执行路径。tests/unit/test_llm.py 新增四种能力组合
+与三种输出模式的请求检查，保留既有坏 JSON、截断、错误工具、权限和依赖拒绝测试。
+
+用户授权本轮 **最多 20 次在线 API 测试，实际 20/20，额度已用完**。固定同一模型
+qwen3.8-flash、openai_chat、json_schema、enable_thinking=false；不改 .env。
+使用既有七技能规划快照（reports/voice_full_request.json），对照时同目标/同上下文/
+同接口 Schema，只替换系统正文。缺少播报节点/全部技能的分支使用删减后的同一快照。
+不读取或上传相机图像、不连接现场节点、不提交动作。每次发送前落账，错误也计数。
+
+在线记录：
+
+- #1–12：六对旧/精简提示，交替请求顺序；视觉观察、播报、桌面物体、问候、歧义、
+  明确禁止播报都通过。输入均值 **6436.17→4365.17 tokens，-32.18%**，每对均少
+  2071；输出均值 61→51.83 tokens，仅是该样本观测，不能保证输出长度总会减少。
+- #13：无 speak 的旧版通过；#14 精简版却生成 describe_objects→set_gripper，
+  #15 加一条禁止替代的规则仍失败，#16 恢复相同旧提示也失败。三次均是语法合法但
+  不符合目标的计划，语义断言拒绝；未执行。旧版同样能失败，因此不能把问题简单
+  归因于去重，也不能依赖接口 Schema 保证计划语义正确。
+- 最终修正：没有 speak 时不给双步骤播报示例，只给 describe_objects 单步示例；
+  没有视觉技能时不展示观察动作示例，并说明缺失能力。完整能力提示仍与 #1–12
+  的精简版逐字一致。#17–20 补测无播报技能、正常视觉、禁止播报、无技能均通过。
+- 总计 **17 次通过、3 次实验失败**；最终版本对应的六份已有结果和四份补测结果
+  共 10 份通过，不能写成“20 次全通过”。所有 20 次均可解析为 PlanDecision，
+  本轮未复现 llm_plan_json_invalid。缺少 speak 的最终版本仅 1 个在线样本。
+
+完整能力系统正文 10171→2361 字符；无 speak 9211→2138；无技能 2597→2043。
+六对完整能力的整次响应平均 **1.81→3.56 秒**，中位数 1.90→2.63 秒；精简版
+样本更慢，未观察到稳定提速。调用是非流式，计时包含网络/排队/生成，缓存和服务
+波动未隔离，不能当作生成吞吐 tokens/s，也不能据小样本判定精简必然更慢。
+供应商报告本轮共 96982 输入、1101 输出 tokens（含对照和失败，不等于费用）。
+
+最终验证命令（固定解释器，经 scripts/run.py 使用项目依赖）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/unit/test_model_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/prompt_dedup_offline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/replay_prompt_dedup.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers/wire.py tests/unit/test_llm.py reports/prompt_dedup_probe.py reports/prompt_dedup_followup.py reports/replay_prompt_dedup.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+**通过**：325 passed / 0 failed / 0 skipped，24.61 秒；Ruff 和 diff 检查通过。
+10 份实际返回离线回放全部通过：独立随机回环 Zenoh、合成相机/检测、Mock TTS；
+验证 SUCCEEDED、观察输出绑定到播报、无播报指令只观察、问候/澄清不执行动作。
+失败的三个计划没有进入回放。离线回放没有追加 API 请求，不播放音频。
+
+在线实际入口：prompt_dedup_probe.py --live-model --through 6，随后 --through 20，
+在 #14 失败时停止；随实验修订的 prompt_dedup_followup.py 依次 --through 15、16、
+17、20，各次发送前计数、失败立即停止。本地 --dry-run 确认接口 Schema 未改变。
+账本保留每次目标、版本、模型 usage、耗时、决策与失败审查；不写凭据、端点或原始
+HTTP。预算限制使现有脚本不能在本轮继续发送。不要将该历史诊断命令当作默认测试。
+初次受限沙箱的 Windows asyncio 初始化挂起，终止该预检后使用许可的隔离外运行；
+所有列出的最终测试命令都实际完成。
+
+证据：reports/prompt_dedup_baseline.json（冻结旧提示/API Schema）、
+prompt_dedup_20.json（完整账本）、prompt_dedup_summary.json（配对统计）、
+prompt_dedup_offline.xml、prompt_dedup_replay.json。当次实验结束时 wire.py SHA256：
+8bf2c55bec0c67841d9d3a4e1d0ef2cfcc97a94c932c2cbd8d9e0f4e53066ada。
+版本：Python 3.12.0、pydantic 2.13.5、httpx 0.28.1、eclipse-zenoh/zenohd 1.9.0、
+pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8、python-dotenv 1.2.4；没有新增依赖。
+
+**未验证/限制**：其他供应商、所有可能指令、真实相机检测质量、扬声器和物理动作；
+没有硬件阻塞项，因为本轮范围为规划与模拟回放。此处通过不代表模型以后不会犯错，
+尤其不能从 Schema 合法推导动作符合用户意图。下一入口：重启 voice/07 使新提示
+生效，维持现有 json_schema 配置，从 09_viewer 正常使用。
+
+## 2026-10-14：模型示例加载仓库 .env
+
+现象：本机根目录 .env 中模型/端点/Key 均已填写，但进程未加载；01_plan 在创建节点
+前以 llm_model_missing 退出。修复 models/01、02 的启动入口，使用显式根路径加载，
+已有环境变量优先；不修改用户配置或核心 from_env 行为。测试使用临时 .env 和受控
+HTTP 夹具，不能读入操作者凭据或启动真实节点。
+
+实际命令：
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.local/uv-cache'
+& '.local/tools/bin/uv.exe' lock --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' export --locked --offline --extra llm --python 'D:/code/venv312/.venv/Scripts/python.exe' --no-emit-project --format requirements-txt --output-file .local/model-example-requirements.txt --quiet
+& '.local/tools/bin/uv.exe' pip install --python 'D:/code/venv312/.venv/Scripts/python.exe' --target .local/deps --require-hashes --no-deps -r .local/model-example-dotenv.txt
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_model_examples.py tests/unit/test_llm.py -q --junitxml=reports/model_example_env.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/models tests/unit/test_model_examples.py
+& '.local/tools/bin/uv.exe' lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+git -c diff.ignoreSubmodules=all diff --check
+```
+
+安装前从工具导出文件中只提取 python-dotenv 的完整条目和哈希，写入
+.local/model-example-dotenv.txt；没有手写锁文件或哈希，没有同步共享 Python。
+首次离线解析因新包尚未缓存失败；沙箱网络访问失败后在外部完成解析/安装。
+原始 diff --check 无法读取受限 submodule 元数据，父仓库忽略 submodule 的检查通过。
+
+**PASS：220 passed in 1.80s，0 failed/skipped**，证据 reports/model_example_env.xml。
+其中新增六项覆盖两个入口的工作目录独立性、带 BOM/引号/JSON 的 .env、显式变量优先、
+导入无副作用、缺根配置不寻找 cwd 文件或默认模型。Ruff、153 包锁一致性、父仓库 diff
+检查通过。Python 3.12.0 / python-dotenv 1.2.4 / httpx 0.28.1 / pytest 9.1.1 /
+Ruff 0.16.8 / uv 0.12.15；指定共享 Python 已有 python-dotenv 1.1.1 未改动。
+
+另以指定 Python 和真实根目录 .env 运行两个入口，使用 unittest.mock 在 asyncio.run
+处关闭主协程并仅调用 LLMConfig.from_env，两个配置均校验通过、Key 存在，不输出值。
+**未运行**：在线模型请求、WRS/硬件执行；本轮不能声称服务端接受当前模型或规划成功。
+下一入口：直接重跑 examples/models/01_plan.py，无需 IDE 额外加载环境文件。
+
+## 2026-10-14：YOLO 推理同帧标注及显式置信度
+
+修正上轮“检测常滞后，只显示文字”的限制：06 左侧实时 RGB，右侧是 YOLO 推理时
+原图及框/类别/分数。YoloNode 新增认证只读 request/vision/frame，按 result_id 取
+原图；最多两份 RGB、采集起两秒有效，失败/换相机会话清除，不保留深度/点云。
+客户端复用相机二进制解包，校验观测/会话/来源/采集时间/尺寸，加完整往返年龄；
+重复读取不能刷新有效期。仅查询已有结果，不触发检测、规划或动作。
+
+置信度过滤原本已有：YoloOptions.confidence=0.35 → YoloDetector → predict(conf)。
+本次仅在 camera/02 顶部增加 CONFIDENCE 配置并传入，启动打印阈值。没有叠加第二套
+显示阈值；发布、描述、定位使用同一过滤后的检测。Planner 本轮未修改，说明依据
+下方真实在线验收和当前 wire/openai_chat/Runtime 代码，不新增在线调用。
+
+修改：nodes/vision/node.py、camera/02 与 06、相关单元/集成测试与检测器 fixture；
+CAMERA.md、examples/README.md、voice/README.md 和执行计划。没有增加依赖。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py tests/unit/test_camera.py tests/integration/test_camera_examples.py tests/integration/test_vision_speech.py -q --junitxml=reports/yolo_overlay.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera/06_read_frame.py examples/camera/02_start_yolo.py wrs_agent/nodes/vision/node.py tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py tests/integration/test_camera_examples.py tests/fixtures/vision_node.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+55 passed / 0 failed / 0 skipped，10.53 秒；修正三个行宽问题后 Ruff 与 diff 检查通过。
+覆盖 0.35/0.65 阈值传给模型、示例传入节点、两帧容量、过期/缺帧/失联、错观测/会话/
+来源/尺寸/时间戳拒绝、框在推理原图而非最新 RGB、关闭与取消。真实 Zenoh 下用
+250 ms 检测器夹具延迟模拟相机缓存已前进，仍读取正确图像并绘框；随后 Mock 播报
+SUCCEEDED。人工检查 reports/yolo_overlay_preview.png：合成杯子在左侧移动，右侧框
+与旧图对应，标签 cup 90%。该图是绘图夹具，不是模型识别实测。
+
+证据 reports/yolo_overlay.xml；依赖沿用下节实测版本：Python 3.12.0、Zenoh 1.9.0、
+Pydantic 2.13.5、NumPy 2.5.3、OpenCV 5.0.0.93、pytest 9.1.1、Ruff 0.16.8。
+阻塞：无；真实 D405/YOLO 准确率、桌面交互、有声播报仍 unverified；本轮模型调用 0。
+下一入口：保持 Router 和 camera/01，重启 camera/02_start_yolo.py 与 06_read_frame.py。
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/camera/06_read_frame.py
+```
+
+## 2026-10-14：相机示例排序与 RGB / YOLO 联合预览
+
+相机示例现为 00 Router、01 Camera、02 YOLO、03 TTS、04 Agent、05 播报、06 预览。
+下方历史验收命令保留当时编号；当前入口见 CAMERA.md。06 从相机读取 RGB，后台
+读取 YOLO snapshot 与 request/vision/result，显示类别、置信度、来源及观测编号；
+同帧同尺寸才画框。重复结果不重置有效期，过期/缺节点/旧相机会话清除显示，
+有效零检测与不可用分开。查询不触发额外推理、模型规划或播报。
+
+修改文件：examples/camera 的 02 至 06 重命名及预览实现；scripts/example_catalog.py；
+camera_opencv、camera_example_config 单元测试及 camera_examples 集成测试；
+examples、voice、grasping 的运行说明、CAMERA.md、DEPENDENCIES.md 与执行计划。
+保留原有相机后端、模型权重、TTS 后端、连接配置以及其他未提交改动。
+
+实际验证命令（仓库根目录）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_camera.py tests/integration/test_camera_examples.py tests/integration/test_vision_speech.py -q --junitxml=reports/camera_reorder.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/integration/test_camera_examples.py scripts/example_catalog.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --check --ignore-submodules
+```
+
+结果：41 passed in 8.90s，失败/跳过均 0；ruff 与 diff 检查通过；check_catalog(Path('examples'))
+通过。真实 Zenoh 进程下，06 读取并绘制合成 RGB 和检测器夹具结果，随后 05 的固定
+播报任务 SUCCEEDED；仅 GUI 调用被替换，绘图/认证/查询是真实实现。初次集成运行
+因测试客户端未使用 LocalStack 临时口令失败，补齐测试环境变量后通过，未放宽认证。
+沙箱内测试停滞后终止，有限离线测试在沙箱外完成。另渲染并人工查看
+reports/camera_reorder_preview.png，确认不同帧检测显示在右侧、无错帧叠框。
+图片上的 FPS 是明确标记的显示夹具值，不作为帧率测量。机器结果保存于
+reports/camera_reorder.xml。
+
+依赖实测：Python 3.12.0、eclipse-zenoh 1.9.0、Pydantic 2.13.5、NumPy 2.5.3、
+opencv-python 5.0.0.93、pytest 9.1.1、ruff 0.16.8；未增加依赖或修改锁文件。
+阻塞：无。未验证：D405 实机、真实 YOLO 准确率、桌面窗口交互和真实音频；本轮不启动
+设备、不加载检测权重、在线模型调用 0 次。下一入口：已有 voice/07 就绪后运行 camera/01、
+02、06；旧 IDE 运行配置需指向重命名后的文件。06 可在没有 YOLO 时只看 RGB。
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/camera/06_read_frame.py
+```
+
+## 2026-10-13：点云与 GraspNet 候选进入 WRS 主场景
+
+行为：voice/09 的点云标签复用已有 WRS WebGPU 场景，不创建点云 canvas。“实时点云”
+保持 5 Hz、最多 8192 个均匀采样点；“抓取候选”每秒最多检查两次最近有效引用，按编号
+读取推理时保留的点云，同一候选集不重复下载，显示最高分的至多 8 个平行夹爪示意。
+新入口 request/grasp/latest 只读小型引用，复用成功状态、boot/epoch、上游分割与 TTL
+检查；新推理开始清空当前展示引用，不回退旧任务。切换/失效释放本层的 GPU 缓冲。
+无外参时在明确标为未标定的相机展示区布局，不改数据坐标或机器人执行权限。
+
+修改：nodes/camera 的 preview.py、panel.js 与新增 scene.js；nodes/grasp 的 data.py、
+node.py；09 顶部 GRASP_NODE 与传入配置；pyproject 包资源、对应测试和接入文档。
+复用已固定 WRS 7815e6f110fd161fe3c3b7e6f978e5393c3cf502 的 window.wrs.renderer/camera，
+未修改 submodule 或增加依赖。特别处理其 remove(model) 不释放共享几何的行为：本层
+固定命名前缀、替换时释放自己的几何，不清空整个场景。通用 Planner/Runtime 未改动。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera.py tests/unit/test_grasp_perception.py tests/unit/test_voice_examples.py tests/unit/test_viewer_hold_button.py tests/integration/test_camera_viewer.py tests/integration/test_grasp_pipeline.py -q --junitxml=reports/camera_scene.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/camera/preview.py wrs_agent/nodes/grasp/data.py wrs_agent/nodes/grasp/node.py examples/voice/09_viewer.py tests/unit/test_camera.py tests/unit/test_grasp_perception.py tests/fixtures/camera_viewer.py tests/integration/test_grasp_pipeline.py reports/viewer_scene_page.py
+& 'C:/Program Files/nodejs/node.exe' --check wrs_agent/nodes/camera/panel.js
+& 'C:/Program Files/nodejs/node.exe' --check wrs_agent/nodes/camera/scene.js
+& 'C:/Program Files/nodejs/node.exe' reports/check_camera_panel.cjs
+& 'C:/Program Files/nodejs/node.exe' reports/check_camera_scene.mjs
+& 'C:/Program Files/nodejs/node.exe' reports/check_camera_browser.cjs
+git diff --check --ignore-submodules
+```
+
+最终 76 passed / 0 failed / 0 skipped，44.75 秒；Ruff、JS 语法与轮询检查、diff 检查通过。
+回归包括完整 Zenoh SAM/FastSAM/框提示三种链路读取同一推理帧，拒绝观测身份不匹配，
+未成功动作、过期与取消期间的结果发现，重复有效性检查不重新下载数组。前端检查
+验证夹爪闭合轴/显示变换、连续 200 次几何替换缓冲数恒定、清除不影响机器人，以及
+WRS scene_init 清空后恢复可视化。测试夹具首次缺临时口令导致 3 失败；修正后回环
+HTTP 一次受系统代理干扰，固定 trust_env=False 后全部通过，未放宽断言。
+
+真实页面检查使用独立无界面 Chrome/155.0.8059.40、本机默认图形后端、真实 WRS
+WebGPU renderer。页面背景含实际 WRS UR7E 几何；相机和候选为合成测试数据，无设备
+连接。验证点云/抓姿/定位、切回深度保留 13 个原场景模型并释放本层几何、结果过期
+清除，页面无额外 canvas、无 JS 异常。已检查截图 reports/camera_scene_points.png、
+camera_scene_grasps.png、camera_scene_focus.png，报告 camera_scene_browser.json。
+首次强制软渲染没有 WebGPU adapter，不算通过；换默认后端后两次检查通过。
+
+依赖沿用本节下方 FPS 记录：Python 3.12.0、NumPy 2.5.3、Pillow 12.3.0、Zenoh 1.9.0、
+websockets 15.0.1、pytest 9.1.1、Ruff 0.16.8，没有安装或下载。网络/浏览器测试经批准
+在沙箱外有限执行，临时服务和独立浏览器在检查完成后退出，未重启用户服务。
+
+D405 与真实 GraspNet 节点联合显示仍 **unverified**；无相机外参，不能声明 world 配准。
+现场入口：按 examples/voice/README.md 的同环境接入说明设置 02/03/04/06 为
+7451 / voice-goal / voice，复用既有 voice/07、camera/01；重启更新后的 GraspNet/09，
+运行 06 生成候选，再点“点云 → 抓取候选”。查看只读；没有在线规划或自动推理。
+
+## 2026-10-13：严格结构输出最终 15 项在线检查全部通过
+
+用户允许本轮最多 30 次调用、要求可用。新增显式 LLM_OUTPUT_MODE=json_schema；
+PlanDecision 提供决策/计划结构，当前 SkillSpec 提供各技能参数、版本、可绑定结果。
+Schema 使用 strict=true，args/inputs 展开为封闭字段，拒绝 plan.text 等多余层级。
+本地 PlanDecision/Runtime 的依赖、资源、权限、版本、epoch 校验继续执行。普通
+问候不创建任务；含糊目标澄清；明确不播报的视觉目标只描述。生产无自动重试或模型切换。
+
+本轮实现文件：wrs_agent/planner/providers/{llm,openai_chat,wire}.py、wrs_agent/errors.py；
+回归文件：tests/unit/{test_llm,test_step_outputs}.py、tests/integration/test_llm_runtime.py。
+配置/说明：本机 .env、.env.example、examples/voice/README.md、本验收及 EXECPLAN。
+其他聊天的相机/抓取等修改保持原样。诊断脚本和报告位于忽略目录 reports，未提交凭据。
+
+账号服务 models 列表包含 qwen3.8-flash，实际请求确认支持本次结构约束；同一端点、
+同一账号凭据未更改。依据 [Qwen 官方结构化输出文档](https://help.aliyun.com/en/model-studio/qwen-structured-output)
+（2026-10-13 查阅），严格模式与 json_object 的语法保证不同。服务端不支持本项目
+原有任意键字典形状，不能只删除 patternProperties；最终按技能合同展开而不放宽
+本地检查。技能 Schema 仍来源于现有参数模型，没有另一套手写参数表。
+
+本轮在线记录 reports/voice_strict_30.json（不含凭据、地址或原始 HTTP/模型错误正文）：
+
+| 请求号 | 内容 | 结果 |
+| --- | --- | --- |
+| 1 | 只读模型列表 | 200，计入预算但不是模型生成 |
+| 2–3 | 初版 json_schema | HTTP 400，任意键字典的 Schema 不兼容 |
+| 4–13 | 展开技能参数后的视觉问法 | 10 个合法 describe_objects→speak 计划 |
+| 14 | 普通问候 | 计划合法但误生成 speak，未符合预期；未在现场执行 |
+| 15–17 | 完成提示约束后的问候、含糊目标、不播报 | ANSWER、CLARIFY、仅 describe_objects，3/3 |
+| 18–26 | 最终 9 种视觉问法 | 9/9，均合法两步计划，文本绑定 describe_objects 输出 |
+| 27–29 | 真实模型→隔离 Runtime→合成视觉→Mock TTS | 三个原始目标全部 SUCCEEDED |
+
+总计 **29/30 次请求预算**，其中 **28 次模型请求尝试**（包含两次 400），最终配置
+的 **15/15** 符合预期。未隐藏探索期失败，未将有限样本当作永久可靠性保证。
+同样的最终 12 份真实决策另在本地 Zenoh 上离线回放，问候/澄清零动作，不播报目标
+只描述；其余文本均为“合成测试画面中识别到：杯子1个。”，与同一 observation_id
+关联的 describe_objects 输出一致。回放 reports/voice_strict_replay.json，真实模型
+模拟执行 reports/voice_strict_live_runtime.json。没有读取/上传现场图像、提交现场
+任务、触发真实相机或扬声器；相机和 YOLO 的诊断输入只有只读节点状态/技能。
+
+实际命令（各命令次数以以上 ledger 为准，不可无授权重复运行在线命令）：
+
+```powershell
+# 只读现场技能和节点状态，无模型请求。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/inspect_voice_planning.py --goal '看看画面里有什么。' --report-name voice_strict_context.json
+# 用户授权的在线检查；--suite 会在首个不符合预期的结果后停止。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/voice_strict_probe.py --live-model --list-models
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/voice_strict_probe.py --live-model --model qwen3.8-flash --mode json_schema --suite visual
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/voice_strict_probe.py --live-model --model qwen3.8-flash --mode json_schema --suite contracts
+# 12 份真实决策，离线回放。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/replay_voice_strict.py
+# 只修改四项公开配置，凭据和其他设置不变；随后 3 次真实模型/模拟节点执行。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/set_voice_strict_config.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/replay_voice_strict.py --live-model
+# 不联网的 07 入口导入/配置/客户端构造预检。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/voice_strict_preflight.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/voice_strict_regression.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers wrs_agent/errors.py examples/voice/07_start_llm_voice.py tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/integration/test_llm_runtime.py
+git diff --check --ignore-submodules
+```
+
+离线回归 **307 passed / 0 failed / 0 skipped**（25.03 秒），Ruff/diff 通过。
+最终错误提示文字同步后，另重跑 tests/unit/test_errors_and_versions.py：19 passed，
+0.97 秒，reports/voice_strict_messages.xml；这是上述套件的子集复核，不累加成新增用例。
+保留已有 HTTP/任务取消和语音控制优先级回归；增加严格请求体、技能字段、可绑定参数、
+无技能时只回答/澄清、非法返回通道/截断/权限字段/错误层级拒绝等检查。
+依赖仍是 Python 3.12.0、Pydantic 2.13.5、httpx 0.28.1、pytest 9.1.1、Ruff 0.16.8、
+Zenoh 1.9.0，无安装或锁文件修改。诊断用的 dotenv 来自既有解释器环境。
+
+过程限制：第一次真实模型/模拟执行尝试因独立夹具缺少项目导入路径而在节点启动
+阶段失败，尚未发出模型请求；固定夹具子进程使用 -S scripts/run.py 后三次成功。
+配置预检在沙箱中停滞，已仅结束本轮诊断进程，在沙箱外运行通过，未改动用户服务。
+
+**落地**：本机 .env 已配置 qwen3.8-flash/openai_chat/json_schema，reasoning_effort
+留空、enable_thinking=false；其他变量经前后比较保持相同。07 入口预检通过；IDE
+运行配置加载 .env 且无 LLM_* 覆盖，报告 voice_strict_preflight.json。旧 07 不热加载，
+操作者需重新运行并看到 `qwen3.8-flash｜openai_chat｜output_mode=json_schema`。
+相机01/YOLO03 ready 后，在09说原句。真实音频、真实检测质量和现场执行仍未验证；
+不能把 Mock 的 SUCCEEDED 当作真实相机/扬声器验收。未提交或发布仓库。
+
+## 2026-10-13：相机采集与 viewer 提速，推理频率保持独立
+
+用户要求提高相机 FPS，但不提高 YOLO/SAM/GraspNet 频率。camera/01 与 grasping/01
+显式配置 848×480/30 FPS。viewer 原先前后端各等待 250 ms，现 RGB/深度预览上限为
+30 FPS、点云预览为 5 FPS。只查询当前视图所需组件；同一观测不重复编码，单 worker、
+至多三个视图缓存，无近期浏览器请求时停止拉帧。浏览器单在途请求，忽略切换前的迟到
+回复，按不同 observation_id 统计接收 FPS。旧画面年龄沿用源帧，不以重复查询刷新。
+SDK 点云仍是每次采集的必需输出，未降为派生数据。YOLO 的 5 Hz 上限以及目标定位、
+SAM/FastSAM、GraspNet 的按任务调用没有改动；本轮没有修改 Planner/Runtime。
+
+实际执行命令（回环临时服务与合成帧，没有启动用户服务或真实设备）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera.py tests/unit/test_camera_example_config.py tests/integration/test_camera_viewer.py -q --junitxml=reports/camera_fps.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasping_example.py -q --junitxml=reports/camera_fps_grasping.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/nodes/camera/preview.py tests/unit/test_camera.py tests/unit/test_camera_example_config.py tests/fixtures/camera_viewer.py examples/camera/01_start_camera.py examples/grasping/01_start_camera.py reports/measure_camera_preview.py
+& 'C:/Program Files/nodejs/node.exe' --check wrs_agent/nodes/camera/panel.js
+& 'C:/Program Files/nodejs/node.exe' reports/check_camera_panel.cjs
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/measure_camera_preview.py
+git diff --check --ignore-submodules
+```
+
+最终结果：27 passed（9.98 秒）+ 12 passed（0.23 秒），共 39 passed / 0 failed /
+0 skipped；Ruff、JS 语法检查、DOM-stub 轮询行为检查和 diff 检查通过。回归包含选定
+分量、重复帧不编码/不重绘、编码耗时计入年龄、无人观看停止拉帧、按视图独立限频、
+切换视图后丢弃旧回复，以及真实 HTTP/Zenoh 下的断线重连。DOM-stub 不等于真实浏览器
+绘制测试。有限网络测试经批准在沙箱外执行，自动关闭本轮临时服务。
+
+848×480/30 FPS **合成源**通过真实本机 Zenoh→编码→HTTP 的三秒采样结果：
+
+| 视图 | 不同帧 / 请求数 | 采样秒数 | 接收 FPS |
+| --- | --- | --- | --- |
+| RGB | 64 / 89 | 3.015 | 21.23 |
+| 深度 | 64 / 83 | 3.032 | 21.11 |
+| 点云 | 14 / 15 | 3.078 | 4.55 |
+
+测量前各视图预热两秒；详细记录 reports/camera_fps_probe.json。采集到 HTTP 的接收
+FPS 不代表 D405 帧率、模型并行负载表现或浏览器绘制 FPS，不宣称满 30 FPS。
+实测依赖：Python 3.12.0、NumPy 2.5.3、Pillow 12.3.0、eclipse-zenoh 1.9.0、
+websockets 15.0.1、pytest 9.1.1、Ruff 0.16.8；未增加依赖或改动锁文件。
+
+硬件验证仍 **unverified**：下一入口为操作者重启所用 01 相机节点、重启 viewer 并刷新
+网页，读取面板的接收 FPS。底层 CameraOptions 缺省仍为 15，需要自定义启动的调用者
+显式传 fps=30。两个运行示例与 viewer/文档已更新；离线测量仅置于 tests/reports。
+本轮既未调用付费模型，也未重启既有相机/推理/音频/机器人服务。
+
+## 2026-10-13：JSON 模式的一次在线复核未通过计划校验
+
+用户明确允许新增 1 次在线验证。脚本读取当前七项技能和就绪节点状态（剔除 lease_id，
+无图像）；相机检测节点 health=ready。本次 qwen-flash/openai_chat 请求显式
+json_object、enable_thinking=false、不发送 reasoning_effort 或工具。返回 finish=stop，
+614 字节协议响应，正文合法 JSON，但字段层级不符合 PlanDecision：
+`extra_forbidden`，位置 `plan.text`。即顶层 text 被放进了只允许 steps 的 plan。
+未保存原始正文；证据 reports/voice_json_mode_live.json，actions_submitted=false。
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/inspect_voice_planning.py --live-model --json-mode --goal '看看画面里有什么。' --report-name voice_json_mode_live.json
+```
+
+此前相同命令带 -S 的首次尝试在 import dotenv 阶段失败，未连接节点或发送模型请求。
+正常解释器能读取现有 venv 的 dotenv；没有安装依赖。上面命令共发送 1 次模型请求，
+本轮额度已用完，未自动重试。诊断进程的成功退出只表示报告已写出，**不代表计划通过**。
+
+结论：JSON Object 的服务端兼容性已验证，但该句在线计划验证 **失败**。本机 .env
+未切换，用户服务未重启，也未上传图像、创建 Runtime 任务或播报。新增错误形状回归
+验证合法 JSON 的 plan.text 仍被拒绝、动作数为零；不挪动字段或丢弃字段后执行。
+JSON Object 不保证 schema，依据 [Qwen 官方文档](https://help.aliyun.com/en/model-studio/qwen-structured-output)。
+下一阶段需适配严格结构输出并确认账号支持的模型；当前不宣称修复完成或长期稳定。
+
+离线复核命令：固定解释器 `-X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py
+tests/unit/test_step_outputs.py -q --junitxml=reports/voice_json_nested_text.xml`；
+207 passed / 0 failed / 0 skipped，3.12 秒。新增 3 项层级错误拒绝用例（JSON mode
+解析，以及 tools/json_object 两种 Runtime 通道），其余为相关回归；Ruff 与限定改动
+文件的 diff --check --ignore-submodules 通过。依赖同下节，没有重跑硬件或付费测试。
+
+## 2026-10-13：显式 JSON 输出模式（离线验证）
+
+用户“看看画面里有什么。”再次触发 llm_plan_json_invalid；只读确认相机、YOLO、
+TTS 等七节点 ready，任务为空。此前 auto 3/3 仅是样本，不是语法保证。错误消息已
+去掉“必须换支持工具的模型”的单一建议；新增 LLM_OUTPUT_MODE=json_object，仅
+openai_chat 可选。请求使用 response_format、不混发 tools，正文由相同 PlanDecision
+与 Runtime 校验。默认 tools 的正文依旧只作回答。禁止自动修 JSON、回退与付费重试。
+
+JSON 模式依据 [Qwen 官方结构化输出文档](https://help.aliyun.com/en/model-studio/qwen-structured-output)
+（2026-10-13 查阅）：qwen-flash 非思考模式支持 json_object，明确使用
+enable_thinking=false。不推断旧 qwen-flash 支持严格 json_schema，也不把 JSON
+语法保证当作正确计划保证。本机 .env 与运行服务未切换，无新增在线模型请求。
+
+实际命令（固定解释器，HTTP 为 Mock、Zenoh 回环、视觉/音频为夹具）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_voice_examples.py tests/integration/test_llm_runtime.py tests/integration/test_vision_speech.py -q --junitxml=reports/voice_json_mode.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/planner/providers wrs_agent/errors.py wrs_agent/skills/vision/__init__.py examples/voice/07_start_llm_voice.py tests/llm_fixtures.py tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/integration/test_llm_runtime.py
+```
+
+结果：273 passed / 0 failed / 0 skipped，22.48 秒；Ruff 通过。新测试包括显式模式
+隔离、配置与 extra_body 冲突拒绝、回答/澄清、截断/拒绝/坏 JSON/非法权限/依赖环
+不创建任务、JSON 候选经真实 Zenoh 到 Mock 节点，以及“看看画面里有什么。”的
+HTTP 夹具→描述→Mock TTS，文本绑定同一 observation_id。这里的自然语言由夹具
+固定响应，不是模型对这句话的实测。报告 reports/voice_json_mode.xml。
+
+依赖实测：Python 3.12.0、Pydantic 2.13.5、httpx 0.28.1、pytest 9.1.1、Ruff 0.16.8、
+eclipse-zenoh 1.9.0，报告 reports/voice_json_versions.json。diff --check --ignore-submodules
+通过；不忽略 submodule 的初次检查受 .git/modules/third_party/wrs 读取权限限制。
+
+运行限制：沙箱内 asyncio 单测首项后停滞，已中止；同一有限命令经审批在沙箱外
+执行后通过。未启动用户相机/音频/机器人或改动现有服务。未增加依赖或修改锁文件。
+在线兼容性与真实视觉播报仍 **unverified**；下一入口是在用户给出新的明确额度后，
+使用 reports/inspect_voice_planning.py --live-model --json-mode 对同句只规划一次；
+不会触发 Runtime 任务或上传图像。之前在线额度已全部用完。
+
+## 2026-10-13：完整现场上下文的 auto 工具选择对照
+
+用户回复已就绪后，只读确认七节点均 ready，总览有 planning_error，最近 Goal 错误
+为 llm_plan_json_invalid，尚无任务。说明现场已加载错误分类修复，但先前最小合同
+检查不足以证明完整场景成功。保留 reports/planner_runtime_state.json 作为此状态证据。
+
+用户明确授权最多四次在线对照后，固定同一份现场七项技能与动作节点快照（排除
+lease_id、无图像），使用同一 qwen-flash/openai_chat、当前提示与 Schema：
+
+| 检查 | 工具选择 | 结果 |
+| --- | --- | --- |
+| 播报画面中的物体 | required 映射指定 propose_plan | 失败：参数括号不匹配，251 字符，第 236 列非法 JSON，finish=stop |
+| 播报画面中的物体 | auto | 合法 execute，describe_objects → speak |
+| 同句复查 | auto | 合法 execute，describe_objects → speak |
+| 桌子上有哪些物体？ | auto | 合法 execute，describe_objects → speak |
+
+三份计划都用 depends_on 与 inputs.text 引用视觉步骤的 text，没有生成物体名单。
+在线检查没有向 Runtime 提交任务、读取图像或触发设备/扬声器。报告保留结构、脱敏
+语法标点和已验证计划，不保留原始回复或私有端点：reports/voice_compare_named.json、
+voice_compare_auto.json、voice_compare_auto_repeat.json、voice_compare_auto_question.json。
+这是三次样本的观察，不是成功率保证；未把强制模式失败静默改写或作为自动重试依据。
+
+落地：只将本机 .env 的 LLM_TOOL_CHOICE 从 required 改 auto，示例同样改为默认 auto，
+README 记录型号差异和现场证据。07 新增不含凭据/地址的模型、协议、工具选择输出，
+帮助核对 IDE 的实际环境。PyCharm 的 07 启用了 ENV_FILES，未发现同名显式变量覆盖。
+现有 07 子进程不热加载环境变量，需用户重启；本轮没有代为启停节点。
+
+实际命令：
+
+```powershell
+# 先只读保存完整上下文；没有 --live-model。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/inspect_voice_planning.py --goal '播报画面中的物体' --report-name voice_full_context_readonly.json
+# 以下两种设置分别执行一次；auto 另以同句和原始问题各复查一次，共四次付费请求。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/inspect_voice_planning.py --live-model --context-file reports/voice_full_request.json --goal '播报画面中的物体' --tool-choice required --report-name voice_compare_named.json
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/inspect_voice_planning.py --live-model --context-file reports/voice_full_request.json --goal '播报画面中的物体' --tool-choice auto --report-name voice_compare_auto.json
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q reports/replay_voice_plans.py --junitxml=reports/voice_actual_plan_replay.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_voice_examples.py tests/unit/test_llm.py --junitxml=reports/voice_auto_config_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/voice/07_start_llm_voice.py examples/voice/09_viewer.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：3 个真实返回计划的离线 Runtime 回放（0.86 s），203 项协议/语音入口回归
+（2.12 s），0 failed/skipped；Ruff、diff 通过。回放为合成杯子与 Mock TTS，三次均
+SUCCEEDED，播报数据为“合成测试画面中识别到：杯子1个。”，与视觉 action.output
+一致。每份回放证据 reports/replayed_voice_compare_*.json；不能当成真实检测证据。
+依赖沿用 Python 3.12.0、Pydantic 2.13.5、httpx 0.28.1、pytest 9.1.1、Ruff 0.16.8，
+未安装包或更改锁文件。
+
+**未验证**：真实相机→扬声器完整执行、更多语句和长期成功率。下一入口：重启 07，
+确认启动行 tool_choice=auto，再按既有顺序接入 01/03/09。此前四次诊断授权已用尽；
+本次另授权四次也已全部使用，不隐含更多在线调用权限。本轮未提交或发布代码。
+
+## 2026-10-13：旧规划错误显示的后续核对
+
+用户再次贴出 invalid_request 的通用英文正文与“故障（无）”。本轮检查时 7451/8001
+无监听，本项目 Python/Router 未运行；只读 reports/check_planner_runtime.py 因连接
+失败未读取到 Goal，不能据该截图定位这次失败的模型内容。最后的 agent.log ready
+时间为本地 15:56:14，runtime 分类修复时间 15:56:35、最终提示 15:59:46；记录中的
+最后一次启动早于修复。固定 Python 直接 import 的 runtime/wire 均指向当前仓库，
+源码检查含 planning_error 与 llm_plan_json_invalid；不存在已发现的包路径遮蔽。
+
+修改 09：FAILED 且总览不含 planning_error 时提示重启 07 加载新代码，不再将这类
+详情缺失显示为“故障（无）”。README 明确 07 子进程不会热加载，仅刷新浏览器或
+重启 09 不会更新 Agent 提示。没有重启/关闭用户节点、连接硬件或新增在线模型请求。
+
+实际检查：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_voice_examples.py --junitxml=reports/voice_stale_viewer_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/voice/09_viewer.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+PASS：34 项（0.16 s）、Ruff、diff；0 failed/skipped。没有为文案增加镜像测试。
+依赖与上一条一致，无安装或锁文件修改。现场检查 BLOCKED 于服务未运行，模型问题
+仍以此前的完整上下文未验证为边界；恢复后先运行上述只读诊断，不自动产生付费重试。
+
+## 2026-10-13：语音视觉问答的工具选择、JSON 与故障显示
+
+用户原句“桌子上有哪些物体？”已进入 Planner；现场 describe_objects/speak 可发现。
+实际在线诊断按用户逐次许可共发出 4 次请求，均没有任务提交、图像上传或真实播报：
+
+1. 原提示/required：返回未提供的 describe_objects 工具，llm_invalid_reply。
+2. 指定 propose_plan、补充计划示例：工具名正确，参数 JSON 无效。
+3. 强调 JSON：仍失败；脱敏结构表明 238 字符的参数在第 239 列 EOF，末尾对象未闭合，
+   finish=stop 而非 length；没有自定义 stop 字段。没有补括号或放宽校验。
+4. 分行示例、text 末置、明确内外闭合：同一 qwen-flash 返回合法 execute 计划，
+   see=describe_objects → say=speak，say.inputs.text 指向 see.text，依赖正确。
+
+第 4 次仅使用本地两项技能合同与空 world：审批等待超时没有执行命令，重试时现场
+Router 已离线，因此改为显式合同检查。它不证明完整现场状态下的稳定性。此前的
+Router 连接失败和一次本地合同索引错误均发生在模型请求前，不算在线调用。
+证据：reports/voice_planning_before_fix.json、voice_planning_after_tool_fix.json、
+voice_planning_unclosed_json.json、voice_planning_contracts.json。只保存结构/安全错误
+与成功验证的计划；不保存原始回复、API 凭据或私有地址。
+
+实现：Chat 的 required 映射为指定 propose_plan（auto 和其他协议保持原行为）；明确
+技能只能放在 plan.steps，提供含结果引用的示例。Runtime 总览增加 planning_error，
+09 显示规划错误；未提供工具、非法 JSON、非法计划结构各有安全消息。坏返回不执行、
+不缓存、不自动付费重试。VISION 技能说明与 voice README 同步；无依赖/账号配置修改。
+
+实际检查命令（固定 Python 3.12.0）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/unit/test_runtime.py tests/unit/test_voice_examples.py --junitxml=reports/voice_visual_planner_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_vision_speech.py tests/integration/test_llm_runtime.py --junitxml=reports/voice_visual_planner_integration.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/runtime.py wrs_agent/errors.py wrs_agent/planner/providers/openai_chat.py wrs_agent/planner/providers/wire.py wrs_agent/skills/vision/__init__.py examples/voice/09_viewer.py tests/unit/test_llm.py tests/unit/test_step_outputs.py tests/unit/test_errors_and_versions.py tests/integration/test_llm_runtime.py --output-format concise
+git -c safe.directory=D:/code/ch/agentOS -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：243 单元（4.35 s）+ 11 回环集成（12.68 s），共 254，0 failed/skipped。
+包含直接技能调用拒绝、解析/结构错误分类、安全故障通过 RPC 到达客户端、错误副本
+隔离、新目标清除旧故障、真实提示中的示例可执行、视觉结果与 Mock TTS 同一输出、
+相机断开/取消不产生迟到播报。最终 Ruff/diff 通过；初次 Ruff 一处长行已修正。
+版本：Pydantic 2.13.5、httpx 0.28.1、pytest 9.1.1、Ruff 0.16.8、Zenoh 1.9.0。
+
+**UNVERIFIED**：最终提示在完整现场上下文下的成功率、真实相机→YOLO→扬声器、
+桌面检测准确率。没有启动真实硬件或下载权重，没有全仓 WRS/硬件验收。下一入口：
+按 07 → camera/01 → camera/03 → 09 重启，原句可直接提交；TABLE_ROI=None 时描述
+全画面，具体桌面区域需按实际视野配置。本轮未执行 Git 提交或推送。
+
+## 2026-10-13：grasping 无参数 RealSense 示例整理
+
+用户入口现在为 examples/grasping/00–06：Router、RealSense、YOLO-World、FastSAM、
+GraspNet、Agent、一次候选任务。配置统一在顶部，main 无参数，无 argparse/sys.argv；
+默认连接与 camera 一致（7449 / wrs-demo / wrs）。01 显式选择 realsense 并允许打开
+相机；02–04 使用已有固定本地模型，05 不启用在线模型。06 拒绝非 RealSense 观测，
+按同一任务串联定位/分割/推理，只读取该任务的 action/output/candidate_set，不执行运动。
+虚拟模型/相机/标定移至 tests/fixtures/grasping，相关测试导入和路径已同步。移除旧
+00_virtual_grasp 与缺少权重的 SAM3 示例入口；生产适配器与 Runtime/设备逻辑未改。
+新增目录 README，更新 examples/README、VISUAL_GRASP 和 example_catalog。
+
+实际检查命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasping_example.py tests/unit/test_fixed_camera.py tests/unit/test_locations.py -q --junitxml=reports/grasping_examples_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_visual_grasp.py -q --junitxml=reports/grasping_examples_virtual.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py reports/check_grasping_entries.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check . --output-format concise
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：28 单元测试（0.43 s）+ 5 既有集成测试（68.02 s），共 33 项，0 failed /
+skipped。覆盖缺少任一依赖节点、相机断开/合成源拒绝、任务失败不读取旧结果、正确
+Step.inputs、仅本任务 action、错误观测拒绝，以及迁移后的 WRS 碰撞/虚拟抬升/取消。
+配置探针拦截 serve_node 后运行 01–05 的实际 main，并用生产 Options 校验参数；
+全部七个入口无参数、共享会话、真实后端和模型本地路径、目录清单检查通过，输出
+reports/grasping_entries.json。首次沙箱内探针停滞已中止，不算通过；同一有限逻辑
+在沙箱外通过。Ruff 和 Git diff 检查通过。所有测试子进程已正常结束。
+
+**UNVERIFIED / 未运行**：没有运行本组真实入口、打开 D405 或加载训练模型，没有
+麦克风/扬声器、机械臂或付费调用。本轮集成测试使用明确的测试夹具，不能当作真实
+相机证据。当前阶段仅整理例子，沿用基础 Python 3.12.0 / pytest 9.1.1 / Ruff 0.16.8，
+SDK/权重/锁文件未改变；已有单模型离线推理证据见下面历史记录，全部模型同时常驻
+和 RealSense 整链仍需现场验证。下一入口为 examples/grasping/README.md 的启动表；
+真实机械臂抓取仍需实测标定与执行接口，不能把感知任务 SUCCEEDED 报为抓取成功。
+
+## 2026-10-13：相机 01/02/03 实际切换到语音环境
+
+上一轮只有说明，没有修改相机的实际连接常量，用户按 07 → 01 启动仍访问 7449。
+本轮将 camera/01、02、03 的 ENDPOINT / ENV_ID / SESSION 实际统一为
+`tcp/127.0.0.1:7451` / `voice-goal` / `voice`，保留相机/权重配置；01/03 启动时
+输出路由信息。同步 Voice、Camera、总示例文档；独立 7449 模式需显式切回三项配置。
+集成测试按常量名替换临时副本路由，避免默认配置变化后误连到用户现有 7451 服务。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/camera_voice_connection.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/unit/test_camera_opencv.py tests/integration/test_camera_examples.py -q --tb=short --junitxml=reports/camera_voice_config.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera/01_start_camera.py examples/camera/02_read_frame.py examples/camera/03_start_yolo.py tests/integration/test_camera_examples.py --output-format concise
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+PASS：16 passed in 5.07s，0 failed/errors/skipped；Ruff/diff 通过。探针加载三份脚本
+但不运行 main，核对真实常量后，只读连接现有 Router 的节点目录。实际发现 camera、
+yolo、asr、tts、voice、agent 为 ready，wrs 为 held；报告保存于
+`reports/camera_voice_connection.json`。未提交动作、发模型请求或启停用户服务。
+集成仅在随机端口启动有限 Mock 服务/合成相机，验证独立相机任务仍可通过显式配置运行。
+
+依赖未变：固定 Python 3.12.0，沿用项目 Zenoh 1.9.0 / Pydantic 2.13.5 /
+pytest 9.1.1 / Ruff 0.16.8。测试和只读回环探针经授权在沙箱外运行。
+UNVERIFIED：目录 ready 不代表设备新鲜帧、检测质量或页面渲染已验收；没有读取真实
+相机图像或执行在线语音目标。当前相机/YOLO 已加入 voice-goal，用户可刷新 09 查看；
+以后启动保持 voice/07 → camera/01 → 按需 camera/03 → voice/09，02 预览可选。
+
+## 2026-10-13：语音 viewer 空握手、相机路由提示与接入说明
+
+根因有两项：WRS World 的页面端口探测建立 TCP 后不发送 HTTP 即关闭，本项目的
+相机扩展页面服务漏掉了 WRS 普通服务的日志过滤；camera 默认 7449/wrs-demo/wrs，
+voice 默认 7451/voice-goal/voice，节点不在同一环境。后者不能通过改变启动顺序解决。
+
+修改：`wrs_agent/env/wrs.py` 为带 HTTP 扩展的 viewer 单独配置 logger，只过滤
+InvalidMessage → 请求行 EOF → 0 字节 EOF 这一条已验证异常链，保留其他错误。
+`nodes/camera/preview.py` 和 `panel.js` 显示查询地址、site/env、node_id，回复无口令。
+相机 01/03 注释、Voice README 与 CAMERA.md 补全语音接入设置及顺序；保留用户现有
+相机/权重/default 会话配置、WRS 子模块和其他未提交修改。没有安装依赖或改锁文件。
+
+实际命令（均从仓库根目录运行）：
+
+```powershell
+# 修改前运行第一条复现失败；修改后最终再次运行，通过。
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_camera_viewer.py::test_viewer_empty_probe_keeps_real_errors_and_http_websocket_working -q --tb=short --junitxml=reports/viewer_handshake_before.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera.py tests/unit/test_camera_example_config.py tests/unit/test_voice_examples.py tests/integration/test_camera_viewer.py -q --tb=short --junitxml=reports/voice_camera_viewer.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_camera_viewer.py::test_viewer_empty_probe_keeps_real_errors_and_http_websocket_working -q --tb=short --junitxml=reports/viewer_handshake_final.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/env/wrs.py wrs_agent/nodes/camera/preview.py examples/camera/01_start_camera.py examples/camera/03_start_yolo.py tests/fixtures/viewer_handshake.py tests/fixtures/camera_viewer.py tests/integration/test_camera_viewer.py --output-format concise
+node --check wrs_agent/nodes/camera/panel.js
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：相关组 56 passed in 8.00s，0 failed/errors/skipped。握手测试日志等待改为
+asyncio.Event 后复跑 1 passed in 1.77s，属于前述 56 项，不重复计数。回环探针验证
+空连接不刷堆栈、非空无效/截断请求仍记录、HTTP handler 抛错仍返回 500 并记录、
+服务随后可继续处理 HTTP 和正常 WebSocket。相机集成仅使用 Mock 节点与合成图像，
+验证离线/接入/断开/重连、路由信息正确且 JSON 不含会话口令。初次 Ruff 发现测试中
+两处轮询等待，改为事件后通过；JS 语法与 Git diff 检查通过。
+
+**已复现失败**：修改前握手测试 1 failed，准确复现用户的 `stream ends after 0 bytes`
+异常链，报告保存在 `reports/viewer_handshake_before.xml`；不是遗留失败。
+测试在获准的沙箱外运行，HTTP/WebSocket/Zenoh 均使用随机回环端口和有限生命周期，
+未使用用户的 7449/7451/8001，不改变现有常驻进程。依赖：Python 3.12.0、websockets
+15.0.1、Zenoh 1.9.0、httpx 0.28.1、Pydantic 2.13.5、NumPy 2.5.3、Pillow 12.3.0、
+pytest 9.1.1、Ruff 0.16.8；未下载模型或调用云端。
+
+**UNVERIFIED**：真实浏览器渲染、真实相机/音频、在线语音到 YOLO 的完整执行未运行。
+下一入口：01/03 同时设置 `ENDPOINT="tcp/127.0.0.1:7451"`、`ENV_ID="voice-goal"`、
+`SESSION="voice"`，保持设备/模型配置，依次运行 voice/07 → camera/01 → camera/03
+→ voice/09；07 已提供 Router/Agent/TTS，无需 camera/00/04/05。只看画面可省略 03。
+已启动的 09 需重启并刷新页面才能加载本次修复，操作说明见 Voice README。
+
+## 2026-10-13：GraspNet 官方训练权重与离线香蕉候选
+
+用户明确批准从官方固定文件 ID 下载并用于非商业研究，之前的权重确认阻塞解除。
+首次下载用固定 Python 的 urllib 流式写临时文件，核对响应为 checkpoint-rs.tar 和
+12,468,415 字节后原子落盘；初次沙箱网络 WinError 10013，授权的网络执行成功。
+模型在 `.local/models/graspnet/checkpoint-rs.tar`，同目录有 LICENSE 和
+checkpoint-rs.provenance.json。首次本地 SHA256：
+`60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868`。
+公开官方来源没有 SHA256；该值固定首次取得的内容，**不是官方哈希核验**。
+新增 `nodes/grasp/assets.json`、显式 `scripts/download_graspnet.py`，示例 02 默认
+使用这些资产与 FastSAM segmentation 节点；加载无网络或任意 pickle 回退。
+
+实际复核命令（下载脚本这次复核已有文件，不重复联网）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/download_graspnet.py --download
+& .local/venvs/graspnet/Scripts/python.exe scripts/check_graspnet.py --weights .local/models/graspnet/checkpoint-rs.tar --sha256 60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868 --input reports/graspnet_rgbd_corrected_0_input.npz --report reports/graspnet_trained.json
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_perception.py -q --junitxml=reports/graspnet_weights_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check . --output-format concise
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/02_start_graspnet.py --help
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.local/uv-cache'
+& .local/tools/bin/uv.exe lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+git -C .local/src/graspnet-baseline diff --exit-code HEAD --
+git check-ignore .local/models/graspnet/checkpoint-rs.tar
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：首次大小检查与后续 SHA256 一致性复核；9 项真实 CPU/CUDA 算子参考检查；
+训练 checkpoint 以 weights_only=True 加载且模型参数严格匹配，生产适配器推理通过。
+输入是官方 RGB-D 示例经 YOLO-World/FastSAM 分割的同一香蕉：13,865 个有效目标点，
+采样到 20,000 点，返回 32 个候选，开口 .0426838–.0499959 m，质量分数
+.118507–.141937（非概率）。另用 SciPy cKDTree 检查候选种子位置到目标点云距离全为 0；
+这只核对坐标关联，不证明夹爪姿态或接触质量。原样输入 NPZ 哈希为
+`6b89d627da154fa401b46549d97fe6d18fd1711d126aca1da5563611a9293bbf`。
+
+报告 `reports/graspnet_trained.json` 保存输入来源、权重哈希、坐标约定和全部候选，
+`reports/graspnet_trained_review.json` 保存坐标/范围复核；推理日志保留上游 torch.cross
+弃用警告，无运行失败。13 单元测试通过（0 failed/skipped）；Ruff、示例 help、lock
+检查（152 包）、官方源码干净及 Git 忽略/空白检查通过。基础 Python 3.12.0，GraspNet
+环境 Torch 2.9.0+cu128、NumPy 2.5.3、SciPy 1.18.1，RTX 5060 Laptop GPU，未改 SDK。
+
+**UNVERIFIED / 未运行**：collision_checked=false、live_observation=false、
+physical_grasp=not_tested。没有启动常驻节点、相机、机器人、麦克风/扬声器或云模型；
+没有重新执行未改变的虚拟抓取例子或全测试集。真实视觉抓取 Environment 仍未实现，
+实测外参/工具变换、真实场景碰撞和物体夹持反馈仍缺失。下一入口为 VISUAL_GRASP.md
+中的常驻 GraspNet 命令及实测标定/执行适配工作；完整目标不能标为完成。
+以下“等待权重确认/未下载”段落是历史检查记录，当前状态以上述结果为准。
+
+## 2026-10-13：在线语音 IDE 的 .env 配置修复
+
+根因：`.env` 已填写模型、端点、密钥，但本机 PyCharm 的 `07_start_llm_voice`
+运行配置 `ENV_FILES` 为空。已将 `.idea/workspace.xml` 中仅这一项改为
+`$PROJECT_DIR$/.env`，补充 `examples/voice/README.md` 的设置说明。Runtime 继续
+仅读环境变量，未改 `.env`、模型选择、凭据、源码或依赖；IDE 文件保持 Git 忽略。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py reports/voice_llm_env_preflight.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_llm.py tests/unit/test_voice_examples.py -q --tb=short --junitxml=reports/voice_llm_env_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/voice/07_start_llm_voice.py tests/unit/test_voice_examples.py wrs_agent/planner/providers/llm.py
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+PASS：有限预检复现无环境变量时的缺失模型报错，按 IDE 文件路径加载配置后，原
+07 main 的真实配置/凭据预检通过并抵达被拦截的 LocalStack 入口。探针同时拦截
+HTTP 发送；实际请求 0、节点启动 0，不输出配置值或密钥。报告为
+`reports/voice_llm_env_preflight.json`。已有单元 **203 passed in 1.64s**，0 failed /
+errors / skipped；Ruff 和 Git diff 检查通过。初次沙箱检查停滞后已中止，获准在
+沙箱外重跑上述两项 Python 检查，未将中止运行算作通过。
+
+环境：固定 Python 3.12.0；项目 httpx 0.28.1 / Pydantic 2.13.5 / pytest 9.1.1 /
+Ruff 0.16.8。仅诊断脚本复用共享解释器已有 python-dotenv 1.1.1，不新增 Runtime
+依赖或隐式 `.env` 加载。UNVERIFIED：PyCharm 界面是否立即重载磁盘改动、在线账号
+模型可用性、完整语音服务及真实音频未运行。下一入口是重新运行 07；若 IDE 保留
+旧缓存，在 `Paths to .env files` 中重新选择仓库 `.env` 并应用，再运行。
+
+## 2026-10-13：相机播报顺序、独立 Agent 与缺失提示
+
+原 05_start_tts 改为 04_start_tts，新增 05_start_agent，原 04_announce 改为
+06_speak_objects；01/03 的真实相机/权重配置保留。05 只连接现有 Router，默认
+live_model=False，不需要 WRS 或云模型；06 先等待 Agent/YOLO/TTS，缺失时提示启动
+文件及会话配置，任务失败不再打印上一轮 TTS 文本。目录清单、README、CAMERA.md 和
+集成用例同步。YOLO 观测/重连实现未修改；根据现有循环说明相机与预览的依赖区别。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py -q --tb=short --junitxml=reports/camera_speech_order_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera scripts/example_catalog.py tests/unit/test_camera_example_config.py tests/integration/test_camera_examples.py --output-format concise
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_camera_examples.py --collect-only -q
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：16 passed in 0.33s，0 failed/errors/skipped；Ruff、Git diff 检查通过。
+固定 Python 的 AST 检查遍历 camera 全部 7 个 main，均无参数且没有 argparse，
+`scripts.example_catalog.check_catalog(Path('examples'))` 通过。初次 Ruff 的一处长行
+已修正。依赖未修改，沿用 Python 3.12.0 / pytest 9.1.1 / Ruff 0.16.8 的项目环境。
+单元使用模拟节点与连接，确认缺 Agent、YOLO 或 TTS 不会提交任务，成功时绑定同次
+describe_objects 输出给 speak，失败时关闭连接且不读取旧 TTS 文本。
+
+**UNVERIFIED / 未运行**：集成用例收集 1 项，仅收集不算通过；现改为 Router 单独启动，
+真实 Agent 必须来自新增 05 脚本，且临时副本强制关闭 live_model、使用合成相机和 Mock
+TTS。遵照用户此前要求，本轮未启动任何 Router/节点/相机/音频服务，新版多进程顺序
+及实际有声播报未实跑。下一入口：用户保持 00、01、03 运行，启动 04、05，再运行 06；
+02 窗口可关闭。04 默认 Mock 无声，需要真实播放时按 CAMERA.md 切换已准备的 Qwen。
+
+2026-10-13 完整目标复核：重新检查模型目录、技能注册、UR 与 WRS 虚拟执行模块及标定
+文件，结果见 VISUAL_GRASP.md 的完成条件表。GraspNet 训练权重仍缺失；真实视觉抓取
+Environment 尚未实现，不能声称只剩实机验证。Planner 的 infer_grasps 说明已补上
+segment_region，Ruff、Git diff 检查和固定 Python 的直接导入检查通过。仅说明文本
+变更，没有重复运行已有 48 项测试/模型探针；未产生新的设备或模型执行证据。
+
+## 2026-10-13：弯曲目标匹配修正与真实 RGB-D 离线输入
+
+发现与修复：固定 GraspNet 示例的 banana 被 YOLO-World 找到（.850），但正确 FastSAM
+掩码因旧像素 mask/box IoU=.315 被拒绝。人工核对候选 9 为香蕉、候选 39 混入相邻
+物体；改为外接框 IoU 后分别为 .921/.542，仍保留 .5 门槛和 .05 歧义分差。
+score_kind 明确改为 box_iou，没有把新分数冒充旧分数。核心相机/Runtime/UR 逻辑未改。
+
+实际命令（Python 基础解释器仍固定为 D:/code/venv312/.venv/Scripts/python.exe）：
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.local/uv-cache'
+& .local/tools/bin/uv.exe lock --python 'D:/code/venv312/.venv/Scripts/python.exe'
+./scripts/setup_graspnet.ps1
+& .local/venvs/graspnet/Scripts/python.exe scripts/prepare_graspnet_example.py
+& .local/venvs/vision/Scripts/python.exe scripts/check_box_segmentation.py --observation reports/graspnet_example.npz --target banana --target drill --report reports/graspnet_rgbd_corrected.json
+& .local/venvs/vision/Scripts/python.exe scripts/check_box_segmentation.py --report reports/box_iou_bus.json
+& .local/venvs/vision/Scripts/python.exe scripts/check_box_segmentation.py --image D:/code/test_ultralytics/images/f80a59131c9db080322649c050170f1b.jpg --target 'green pepper' --target tomato --target onion --report reports/box_iou_table.json
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_locations.py tests/unit/test_fastsam.py tests/unit/test_grasp_perception.py tests/unit/test_vision_results.py --junitxml=reports/box_iou_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py --junitxml=reports/box_iou_pipeline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q 'tests/integration/test_visual_grasp.py::test_voice_planner_virtual_grasp_and_speech[False-True]' --showlocals --junitxml=reports/box_iou_cancel_retry.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_visual_grasp.py --junitxml=reports/box_iou_visual_final.xml
+```
+
+PASS：40 单元 + 3 数据链 + 5 最终虚拟抓取 = **48 个不同测试**。初次合并集成运行
+为 7 passed / 1 failed，失败发生在规划前 provider_not_found，并未执行动作；原测试
+单独重跑通过。该测试之前先启动 Mock WRS 再热替换，现改为启动时配置 wrs-grasp，
+去掉与语音抓取场景无关的替换步骤；随后整个 visual_grasp 文件 5 passed。
+不是以重试次数充当新增通过数，初始失败报告保留。没有改变 Runtime 的拒绝规则。
+
+真实模型：Ultralytics 8.4.175 / Torch 2.9.0 CU128，YOLO-World、CLIP、FastSAM 权重
+仍为此前已校验本地文件。香蕉 13,865 个分割像素都有有效深度，.421–.488 m，生产
+sample_target 函数产生 20,000 个点。NPZ 保留原 RGB、depth、points 数组逐项完全一致，
+mask 与保存 PNG 完全一致。与固定上游 data_utils.create_point_cloud_from_depth_image
+对照，float32 XYZ 最大误差 1.1546e-7 m；按 float32 精度预算检查通过。初次人为设定
+1e-7 m 绝对阈值略小于该舍入误差而失败，未将其算作通过。数值一致性不是设备精度证据。
+证据为 reports/graspnet_rgbd_review.json、graspnet_rgbd_corrected.json 及输入 NPZ。
+
+旧图片回归：bus / green pepper / tomato 掩码与旧报告逐像素相同，新框 IoU 为
+.941/.946/.957；elephant 不存在拒绝、person 多目标拒绝。onion 和示例 drill 漏检
+仍是质量限制，未记为成功。官方示例与两张旧图片均没有物理抓取结果。
+
+依赖：graspnet 隔离环境新增 SciPy 1.18.1、Pillow 12.3.0；uv 实际生成锁仍 152 包，
+pip check 23 包通过。全仓 Ruff、Git diff 检查通过。一次依赖操作在自动审批阶段
+超时，命令未启动；按返回指示重试后成功，无待处理的审批拒绝。所有模型推理离线，
+没有新权重下载、设备连接、录音或云调用。完整抓取目标仍未完成，待权重下载确认、
+训练模型抓姿验证、实测标定与实机动作验收。
+
+有限例子也已实际运行：
+`D:/code/venv312/.venv/Scripts/python.exe -X utf8 -S scripts/run.py examples/grasping/00_virtual_grasp.py`
+输出 `虚拟抓取结果： SUCCEEDED` 和 `虚拟场景中已夹持并抬起测试方块。`，使用明确模型
+夹具、真实 WRS 虚拟碰撞/抬升运算与 Mock TTS；不是相机实物或扬声器验证。
+
+## 2026-10-13：GraspNet Windows CUDA 扩展与无权重网络验证
+
+固定源码 `280c215129f759ed8649cb4e89fc5dfee55f4f80`。实际命令：
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.local/uv-cache'
+& .local/tools/bin/uv.exe lock --python 'D:/code/venv312/.venv/Scripts/python.exe'
+./scripts/setup_graspnet.ps1 -BuildExtensions
+./scripts/setup_graspnet.ps1
+& .local/venvs/graspnet/Scripts/python.exe scripts/check_graspnet.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_grasp_perception.py tests/unit/test_locations.py --junitxml=reports/graspnet_environment_unit.xml
+& .local/tools/bin/uv.exe pip check --python .local/venvs/graspnet/Scripts/python.exe
+& .local/tools/bin/uv.exe lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent tests examples scripts
+git -c core.safecrlf=false diff --ignore-submodules --check
+git -C .local/src/graspnet-baseline diff --exit-code HEAD --
+```
+
+PASS：Python 3.12.0、Torch 2.9.0+cu128、NVIDIA CUDA nvcc 12.8.93、MSVC 14.44，
+RTX 5060 Laptop。Ninja 1.13.2 / setuptools 84.0.0 / wheel 0.48.0。
+两个真实扩展编译和安装成功；再次执行完整安装、再默认刷新 SDK 均通过，扩展保留。
+独立环境 pip check 为 21 包，真实 lock 为 152 包。没有改动共享或语音/vision 环境。
+
+9 项真实算子数值检查：FPS、gather、3NN、插值、球邻域、group、旋转圆柱邻域、
+CPU KNN int64、CUDA KNN int64，包含两批数据和非默认 CUDA 流；全部与小型参考计算
+一致。随机初始化的完整网络在 20,000 点输入上完成前向与 pred_decode，输出有限且
+维度正确，最新单次约 .345 s；这不是训练模型或实时性能基准。训练权重推理及物理
+抓取均明确 not_tested。源码保留 torch.cross 默认 dim 弃用提示，当前锁定版本通过。
+
+现有抓姿/定位回归 **23 passed，0 failed/errors/skipped**；全仓 Ruff、PS 语法解析、
+Git diff 检查通过；官方源码仍干净。没有重跑全仓集成测试或使用夹具结果冒充 SDK 检查。
+报告：reports/graspnet_sdk.json、graspnet_check.log、graspnet_setup_verified.log、
+graspnet_sdk_refresh.log、graspnet_environment_unit.xml。扩展编译输入哈希保存在
+.local/build/graspnet-extensions/build_sources.json，官方组件清单在
+.local/downloads/cuda-12.8.1/manifest.json，许可随本地源码和构建副本保存。
+
+首次编译准备在 VS 环境命令引号处失败，修正后完整入口通过；首次沙箱回归出现失败
+并停在异步测试，已中断该次进程，在具备临时目录/本地通信权限的环境重跑取得上述
+23 passed。初次 pip check 也因沙箱缓存权限失败，指定项目缓存后复核通过。失败未
+算通过，初始安装日志保存在 reports/graspnet_setup.log。所有构建/探针进程已结束。
+
+未完成：官方 checkpoint-rs.tar 下载（公开大小 12,468,415，未发布 SHA256；用户的
+非商业研究用途/首次来源信任确认尚未到）、训练模型真实点云推理、D405 标定及实机
+夹持/停止验收。完整目标继续进行中。没有自动连接相机、机器人或音频设备。
+
+## 2026-10-13：YOLO26n 本地权重和直接启动例子
+
+用户授权下载；从 `https://api.github.com/repos/ultralytics/assets/releases/tags/v8.4.0`
+读取 yolo26n.pt 的官方资产信息（asset_id 340096055），以 Python urllib 下载
+`https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.pt` 到同目录临时文件，
+核对 5,544,453 字节及官方 SHA256 后原子放入 `.local/models/yolo/yolo26n.pt`。
+哈希：`9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef`。
+来源/许可记录 `.local/models/yolo/yolo26n.source.json`；文件被 Git 忽略。
+03 默认路径、GitHub 链接与 CAMERA/DEPENDENCIES 文档已更新，继续无命令行参数。
+
+实际验证命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 .local/check_yolo26.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py -q --tb=short --junitxml=reports/yolo26_example_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera/03_start_yolo.py --output-format concise
+git check-ignore .local/models/yolo/yolo26n.pt .local/models/yolo/yolo26n.source.json
+```
+
+**PASS**：下载 SHA256/字节数匹配；实际读取 03 的路径和 device 配置，通过现有
+YoloDetector / Ultralytics 在 CPU 上加载并推理本地安装包的 bus.jpg，80 类模型得到
+1 个 bus、4 个 person，结果保存在 `reports/yolo26_local_inference.json`。
+模型加载和推理期间阻止 socket connect/connect_ex；没有额外下载、云调用或硬件读取。
+11 单元 passed in 0.30s，0 failed/errors/skipped；Ruff 与 Git 忽略检查通过。
+真实推理环境：固定 Python 3.12.0、Ultralytics 8.4.24、Torch 2.9.0+cu128；依赖未修改。
+初次沙箱联网被拒，批准后完成下载；沙箱内 resolve 权重路径被拒，批准后离线推理通过。
+Ultralytics 提示项目 `.local/ultralytics` 设置格式重置，加载/推理正常且 sync 被关闭。
+**UNVERIFIED**：未启动常驻节点或相机，未测试实时吞吐和 D405 画面的检测效果；本轮
+单图推理只验证模型与适配器兼容。用户保持 00/01 运行后直接运行 03 即可。
+
+## 2026-10-13：RealSense RGB 黑洞与彩色网格对齐修复
+
+修改 RealSense 驱动、CameraFrame/Observation、节点传递与 CAMERA.md；02 仍为简单的
+RGB→BGR/FPS 预览，不增加配置项。彩色图保持原样，深度对齐到彩色网格，XYZ/内参/坐标
+名称同步。新增实际 pyrealsense2 软件帧测试：不枚举或连接设备，注入有完整 RGB、
+大量零深度的不同分辨率帧，复现旧方向黑洞，验证修复保留颜色且不会伪造无效三维点。
+同时检查节点事件和二进制 Query 往返保留 color_grid/坐标标识及全部数组。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_alignment.py tests/unit/test_camera_driver.py tests/unit/test_camera.py tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py tests/unit/test_fixed_camera.py -q --tb=short --junitxml=reports/camera_color_alignment.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent/drivers/cameras wrs_agent/nodes/camera examples/camera tests/unit/test_camera_alignment.py tests/unit/test_camera_driver.py tests/unit/test_camera.py tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_vision_results.py tests/unit/test_fixed_camera.py --output-format concise
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**PASS**：37 passed in 1.47s，0 failed/errors/skipped，报告为上述 JUnit 文件；
+Ruff（All checks passed!）与 diff 空白检查通过。
+最初沙箱试跑 SDK 同步测试通过，但异步测试未完成，已中止；改在批准的环境运行同一批
+离线检查后完成。初次 Ruff 报 zip 的 strict 参数与行宽问题，已修正。
+依赖未变：Python 3.12.0、pyrealsense2 2.56.5.9235；其余沿用上一轮项目依赖。
+**UNVERIFIED**：未启动 Router/真实相机/GUI；用户需重启 01、02 核对实机画面。
+机器人外参需要匹配新的 color-optical frame，不能复用 depth-optical 的坐标声明。
+
 > 本文件按日期保留历史验收命令。2026-09-20 示例已全部重写，旧路径和旧参数仅供历史审计；当前运行入口见 [示例目录](../examples/README.md)，本次结果见文末“全部示例重写”。
+
+## 2026-10-13：OpenCV 预览、FPS 与相机示例配置简化
+
+修改 01/02/03、camera extra/dev 依赖、uv.lock、示例目录、单元/集成用例与说明。
+01 删除顶部 ALLOW_HARDWARE，选择 realsense 即显式准入；节点边界保持默认拒绝。
+03 删除手填 WEIGHTS_SHA256，自动记录用户选择的本地文件指纹并交节点复核，不宣称
+已核验模型来源，也不下载权重。02 改为 RGB OpenCV 预览：最新帧事件触发读取，统计
+不同观测的接收 FPS，重复不计数，超时或一秒过期清除旧画面，Q/Esc/关窗退出并清理。
+
+实际命令：
+
+```powershell
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache lock --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache export --frozen --extra camera --extra realsense --extra llm --no-emit-project --output-file .local/camera-requirements.txt
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache pip install --python 'D:/code/venv312/.venv/Scripts/python.exe' --target .local/deps --require-hashes -r .local/camera-requirements.txt
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_opencv.py tests/unit/test_camera_example_config.py tests/unit/test_camera.py tests/unit/test_camera_driver.py tests/unit/test_vision_results.py -q --tb=short --junitxml=reports/camera_opencv_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera tests/unit/test_camera_example_config.py tests/unit/test_camera_opencv.py tests/integration/test_camera_examples.py scripts/example_catalog.py --output-format concise
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_camera_examples.py --collect-only -q
+```
+
+**PASS**：30 单元 passed，0 failed/errors/skipped；Ruff、锁检查（150 包）、目录分类通过。
+真实 OpenCV 像素转换/绘字配合窗口和网络替身验证颜色顺序、重复帧不虚增 FPS、断流清图、
+关闭窗口与取消清理。例子的硬件准入映射、本地模型缺失拒绝和自动指纹均有离线证据。
+集成只收集 1 项不算通过；02 已移为交互例子，默认验证不打开窗口。
+
+锁定 opencv-python 5.0.0.93，实际模块 5.0.0 / WIN32UI；通过带哈希的导出文件向
+.local/deps 增量安装 1 包。共享 Python 的 OpenCV 4.10.0 未动；其他版本沿用本节之前
+项目环境。首次离线安装缓存不足、沙箱内联网 socket 被拒，获准沙箱外安装后成功。
+**UNVERIFIED**：未启动 Router、相机、模型节点或窗口；实际 D405 帧率和真实 GUI 未验证。
+修改已完成；用户自行运行 00/01/02。03 仍需本地 YOLO 检测权重，现有 FastSAM/CLIP
+不能代替；本轮未下载模型，不能把配置简化当作 YOLO 推理已通过。
+
+## 2026-10-13：RealSense 空序列号选默认设备
+
+用户要求 SERIAL 留空使用默认相机，已自行设置 ALLOW_HARDWARE=True；保留该配置。
+修改 01 的配置提示、CameraOptions、RealSense driver 和采集线程：空序列号先由 SDK
+resolve 选可满足配置的设备，取得真实序列号，在采集线程中按该编号取得设备锁后开流。
+同一 driver 在重连期间保留设备编号；指定设备消失不改选其他相机；帧坐标系包含实际编号。
+本机 pyrealsense2 `config.resolve` / `enable_device` docstring 已核对，无实际设备调用。
+同步相机文档、README 和单元/集成用例；集成副本固定 synthetic/mock，避免继承用户配置。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera.py tests/unit/test_camera_driver.py tests/unit/test_camera_example_config.py -q --tb=short --junitxml=reports/camera_default_device.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera wrs_agent/drivers/cameras wrs_agent/nodes/camera tests/unit/test_camera.py tests/unit/test_camera_driver.py tests/unit/test_camera_example_config.py tests/integration/test_camera_examples.py --output-format concise
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_camera_examples.py --collect-only -q
+```
+
+**PASS**：20 单元 passed，0 failed/errors/skipped；Ruff（初次两处超长行已修复）。
+覆盖默认选择前不开流、固定序列号重连、指定设备不回退、开流失败清理、按真实设备加锁、
+锁冲突不开流、硬件 opt-in 保留和示例允许空序列号。集成收集 1 项不算通过。
+依赖未变，Python 3.12.0 / pyrealsense2 2.56.5.9235，其余沿用下述项目依赖。
+**UNVERIFIED**：本轮未启动任何常驻服务或真实相机，实际 SDK 采集/拔插与多进程未运行。
+代码修改完成，无剩余编辑阻塞；用户可以保留 SERIAL="" 自行按 00 → 01 → 02 运行。
+
+## 2026-10-13：camera 全部例子取消命令行参数
+
+后续配置提示修复：01 已被用户改为 realsense，但序列号为空且硬件开关仍为 False。
+示例新增连接前的中文提示，保留该配置与 CameraOptions 的校验；未启动任何服务。
+实际运行以下命令，**6 passed，0 failed/errors/skipped**；相关两文件 Ruff 检查通过。
+这是离线配置校验，不代表 D405 已连接；Python/依赖版本沿用下述环境，未改依赖。
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/unit/test_camera.py::test_hardware_requires_both_explicit_serial_and_opt_in -q --tb=short --junitxml=reports/camera_config_guard.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera/01_start_camera.py tests/unit/test_camera_example_config.py --output-format concise
+```
+
+01–05 的地址、设备/后端、序列号、模型路径/哈希及目标文本改为文件顶部常量，
+`main()` 均无参数；00 已符合要求。删除 argparse 与旧 CLI 帮助测试，集成用例改为
+修改临时脚本副本的地址后直接运行；未给教学代码增加环境变量覆盖或配置框架。
+同步修改 CAMERA.md 与 examples/README.md。真实设备选择仍需在代码中显式确认；
+未提供 YOLO 权重或哈希会在连接前提示修改，不下载或绕过现有模型校验。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/unit/test_camera.py tests/unit/test_camera_driver.py tests/unit/test_vision_results.py -q --tb=short --junitxml=reports/camera_no_cli_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera tests/unit/test_camera_example_config.py tests/integration/test_camera_examples.py --output-format concise
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera_example_config.py tests/integration/test_camera_examples.py --collect-only -q
+git -c core.safecrlf=false diff --ignore-submodules --check -- examples/README.md docs/ACCEPTANCE.md docs/EXECPLAN_V1.md
+```
+
+**PASS**：18 单元 passed，0 failed/errors/skipped；两项配置拒绝用例确认无网络/模型加载。
+Ruff、六份 Python AST/无 CLI/无参数 main 检查、示例目录检查与 diff 检查通过。
+单元和集成共 3 项收集成功（仅收集不算通过）；新版集成用例未实跑。
+初次 Ruff 导入空行格式失败已修正；版本查询首次未加入项目依赖路径，修正后成功。
+依赖未修改：Python 3.12.0、eclipse-zenoh 1.9.0、Pydantic 2.13.5、pytest 9.1.1、Ruff 0.16.8。
+
+**UNVERIFIED / 未运行**：按用户要求，本轮没有启动 Router、相机、WRS、音频或模型服务，
+没有进行新版示例的真实多进程运行、D405/YOLO/音频验证。无剩余编辑阻塞；下一入口
+是用户修改各文件顶部常量，按 CAMERA.md 的顺序直接运行文件，无需追加启动参数。
+
+## 2026-10-13：相机独立 Router 启动例子
+
+新增 `examples/camera/00_start_router.py` / `router.json5`：无 argparse 或必填命令行参数，
+固定本机 7449、准备共享口令，Ctrl+C 清理自己的 Router。更新 `_session.py` 的入口提示、
+`example_catalog.py`、CAMERA.md、examples/README.md 与执行记录；未修改既有相机接口。
+
+实际命令（固定解释器，第一条在用户澄清“不代为启动”之前完成）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_camera.py tests/unit/test_camera_driver.py tests/integration/test_camera_transport.py tests/integration/test_camera_examples.py -q --tb=short --junitxml=reports/camera_startup_regression.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_example_tokens.py -q --tb=short --junitxml=reports/camera_router_tokens.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check examples/camera/00_start_router.py examples/_session.py scripts/example_catalog.py --output-format concise
+git -c core.safecrlf=false diff --ignore-submodules --check -- examples/_session.py examples/README.md scripts/example_catalog.py docs/CAMERA.md docs/EXECPLAN_V1.md docs/ACCEPTANCE.md
+```
+
+**PASS**：原有相机软件回归 15 passed；共享口令 17 passed；Ruff、AST 语法、JSON 配置、
+`check_catalog(Path('examples'))` 和 diff 检查通过。最终两组均 0 failed/errors/skipped。
+最初沙箱 socket/硬链接权限分别导致中止和 3 failed/14 passed，获准在沙箱外重跑后通过。
+只读进程核对确认临时服务已退出；用户澄清后未启动 Router、相机或 WRS 服务。
+
+依赖未变：Python 3.12.0、eclipse-zenoh 1.9.0、Pydantic 2.13.5、NumPy 2.5.3、
+pyrealsense2 2.56.5.9235、pytest 9.1.1、Ruff 0.16.8。直接运行共享解释器另会加载
+Zenoh 1.10.1 / Pydantic 2.12.3，不能将该差异视为本次连接失败的已证实原因。
+**UNVERIFIED**：遵照用户要求，新增常驻 00 未实际启动；D405 采集未运行。
+无剩余编辑阻塞；下一入口由用户在三个终端按 00 → 01 → 02 启动。
 
 完整 V1 矩阵仍按阶段验收；最新结果见文末及 reports/cancel_summary.json；旧阶段报告为历史证据，未运行项不视为通过。报告必须区分 PASS、FAIL、SKIP、BLOCKED 与 UNVERIFIED。SKIP/BLOCKED 不算通过。
 
@@ -1319,3 +2703,285 @@ submodule 工作树干净。pyproject 只迁移包资源声明，依赖、锁文
 目录描述、在线声明、保留连接和技能所有者的上限分别为 64、1024、128、4096。
 节点与客户端需同步更新以使用调整后的接口与线协议。
 下一入口：[技能编写](../wrs_agent/skills/README.md) 与 examples/nodes/06_late_node.py。
+
+## 2026-10-13：Camera → YOLO → Runtime → TTS 与 WRS 相机面板
+
+实现与入口见 [CAMERA.md](CAMERA.md)。新增 `drivers/cameras/`、`nodes/camera/`、
+`nodes/vision/`、`skills/vision/` 和五份 `examples/camera/` 示例。
+核心增加独立有界二进制查询、成功 ActionStatus.output、受限 Step.inputs；原 WRS
+viewer 通过 adapter 的 HTTP 扩展加入相机面板，未修改 WRS submodule。
+
+实际命令（固定解释器，离线模型/音频 fixture，真实 Zenoh 与 WRS 虚拟进程）：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py scripts/verify.py --wrs
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit -q --tb=short --junitxml=reports/camera_final_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent tests examples scripts --output-format concise
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+git diff --ignore-submodules --check
+```
+
+统一验收退出 0，初次单元分组 704 passed。最终审查补上一例“页面端口占用时关闭预览
+连接”，并重跑单元得到 **705 passed**；该修改后的页面/WRS 检查也在统一验收后续阶段
+通过。最终覆盖 **705 单元 + 96 Zenoh + 14 WRS = 815 passed，0 failed/errors/skipped**。
+按 marker 分组的 deselected 不计为 skip 或通过。**20 个有限示例、Ruff、doctor/WRS
+虚拟探针、uv lock --check、git diff --check 均通过**。新增 camera 示例实际多进程运行
+由 test_camera_examples 覆盖；03_start_yolo 仅执行 --help，模型适配器使用 fixture 验证。
+
+浏览器本机检查实际命令为：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py .local/camera_visual_check.py
+```
+
+本机检查脚本使用独立临时 Chrome 配置、虚拟 UR7E 场景和合成相机；WebGPU 初始化成功，
+RGB/Depth/可拖动点云均显示，断连后清除旧数据，捕获的页面 JavaScript 异常数 0。
+检查并保留 `reports/camera-ui-{offline,rgb,depth,points,disconnected}.png` 和
+`reports/camera-ui.json`。自动重连另由 test_camera_viewer 的独立子进程验证。
+原始测试输出及 XML 在 reports/；`reports/camera_acceptance.json` 从上述真实报告汇总。
+这些本机脚本/报告不提交；可复现的软件验收入口仍为 `scripts/verify.py --wrs`。
+
+本轮首次检查发现并修正：发现协议遗漏 camera 类型、示例误用任务句柄 API、测试加载 WRS
+污染父进程、Zenoh 1.9 废弃回复 QoS 参数和页面启动失败时连接清理。沙箱内 Python 3.12
+socketpair 初始化受阻，离线网络测试改在获准的沙箱外执行；不以超时或跳过冒充通过。
+
+实际相机测试依赖：Python 3.12.0，Zenoh/zenohd 1.9.0，Pydantic 2.13.5，NumPy 2.5.3，
+Pillow 12.3.0，pyrealsense2 2.56.5.9235，pytest 9.1.1，pytest-asyncio 1.4.0，Ruff 0.16.8。
+独立 WRS doctor 探针沿用现有科学环境 NumPy 1.26.4/SciPy 1.16.2/WGPU 0.32.0。
+WRS 指针为 7815e6f110fd161fe3c3b7e6f978e5393c3cf502，工作树干净。
+uv 工具实际解析并锁定 145 个包；YOLO 可选依赖已锁定，未安装/运行真实模型权重。
+
+**UNVERIFIED**：D405 实机及拔插、真实 YOLO 推理/精度、有声 TTS、在线 Planner、实机运动、
+跨机及性能基准。软件链路使用明确标识的合成帧/检测器 fixture/离线模型响应/Mock TTS。
+未实现 SAM3、GraspNet 节点、掩码服务及相机到机器人 world 的标定融合。
+下一阶段由操作者按 CAMERA.md 提供设备序列号、已核对版本/许可/SHA256 的本地权重及
+音频环境，分别开展实机验证；不得将本次软件通过解释为物理抓取或实时性认证。
+
+## 2026-10-13 后续：SAM3 / GraspNet 节点与 WRS 虚拟抓取
+
+本节更新上节“未实现 SAM3/GraspNet”的历史状态。当前合同与限制见
+[VISUAL_GRASP.md](VISUAL_GRASP.md)。用户确认 D405 固定桌边、暂无标定/模型环境/权重，
+先完成节点与虚拟闭环。完整物理抓取目标仍未完成。
+
+新增 nodes/segmentation、nodes/grasp、有限任务数据缓存、skills/vision/grasping，
+以及 env/fixed_camera.py、env/wrs_grasp.py。WrsNode 显式选择 wrs-grasp 后端；
+普通 WRS/UR 后端未改变。核心仅补充已接受动作身份读取，沿用现有 Step.inputs。
+
+真实运行命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py scripts/verify.py --wrs
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_grasp_perception.py tests/unit/test_fixed_camera.py tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py -q --tb=short --junitxml=reports/grasp_final.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/00_virtual_grasp.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/01_start_sam3.py --help
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/02_start_graspnet.py --help
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+最终统一验收退出 0：**720 单元 + 97 Zenoh + 17 WRS = 834 passed**，
+0 failed/errors/skipped；**21 个有限例子、Ruff、doctor/WRS 探针通过**。
+19 项针对性回归通过，但属于上述测试子集，不重复计数。
+两份真实模型启动脚本只测试 --help，没有运行真实 SAM3/GraspNet 权重。
+
+覆盖同帧/全场景数据保留、任务隔离、过期/取消/重启拒绝、歧义、输入矩阵、
+ASR 协议→Voice→真实 Planner 协议→SAM/Grasp fixture→WRS 虚拟抓取→Mock TTS，
+以及语音停止后保留夹持、模型状态冻结和禁止后续播报。WRS 隔离探针确认 88 个路径点、
+抬升及真实建模障碍物拒绝；失败规划恢复原模型状态。
+
+首次失败包括重名测试模块、夹具遗漏 open、WRS viewer 无碰撞体、挂载夹爪结构忽略
+遗漏及 3 cm 虚拟目标与网格冲突。已修复并收紧接近/闭合碰撞检查，最终例子使用
+1 cm 配置方块。碰撞通过仅对应当前虚拟模型，不能推断真实夹爪可抓尺寸或接触性能。
+
+证据：reports/acceptance.json、unit.xml、zenoh.xml、wrs.xml、grasp_final.xml，
+以及统一脚本生成的逐项输出。实际版本 Python 3.12.0、Zenoh/zenohd 1.9.0、
+Pydantic 2.13.5、pytest 9.1.1、pytest-asyncio 1.4.0、Ruff 0.16.8。
+WRS doctor 科学环境 NumPy 1.26.4、SciPy 1.16.2、MuJoCo 3.5.0、WGPU 0.32.0。
+WRS 提交 7815e6f110fd161fe3c3b7e6f978e5393c3cf502，工作树干净。
+本阶段未新增依赖/改锁文件，保留上一阶段及用户未提交修改；未 commit/push。
+
+**UNVERIFIED / 未完成**：SAM3/GraspNet 实际环境与权重、Graspness 适配、D405 实机、
+实测外参/工具变换、真实场景和接触/掉落验证、有声输入输出、在线模型、实机运动与停止。
+虚拟后端只确认已知方块的几何捕获和刚性连接；真实硬件能力没有被 Mock 成成功。
+下一入口是 VISUAL_GRASP.md 的真实模型环境与固定相机标定条件。
+
+### 后续 SAM3 SDK 环境切片（2026-10-13）
+
+SAM3 模型适配改用 Transformers 图像 API，节点/技能/数据合同不变。新增 sam3 extra、
+独立环境安装脚本、固定配置清单、显式下载与离线检查入口。uv 真正解析 147 包；
+`.local/venvs/sam3` 安装 43 包，pip check 全部兼容。模型文件没有下载。
+
+实际运行命令：
+
+```powershell
+$env:WRS_AGENT_PYTHON = 'D:/code/venv312/.venv/Scripts/python.exe'
+./scripts/setup_sam3.ps1
+& '.local/venvs/sam3/Scripts/python.exe' scripts/check_sam3.py --report reports/sam3_sdk.json
+& '.local/venvs/sam3/Scripts/python.exe' scripts/check_sam3.py --device cpu --report reports/sam3_sdk_cpu.json
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache pip check --python '.local/venvs/sam3/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/unit/test_sam3_assets.py tests/unit/test_grasp_perception.py tests/unit/test_fixed_camera.py tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py -q --tb=short --junitxml=reports/sam3_grasp_regression.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent tests examples scripts --output-format concise
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**27 passed，0 failed/errors/skipped**（含新增 8 个资产/下载前置检查；其余与上次验收重叠，
+不加到 834 作为全仓重跑结果）。CUDA 与 CPU 实际 SDK 后处理通过：输出大小、左右目标
+选择与 SDK 完整结果一致；默认歧义拒绝，NaN 不得使查询索引错位。Ruff、锁文件、
+依赖一致性、下载脚本 --help、节点模块启动 --help 均通过。
+
+SDK 实测版本：Torch 2.9.0+cu128、Torchvision 0.24.0+cu128、Transformers 5.15.1；
+GPU 为 RTX 5060 Laptop（8151 MiB）。这些测试使用 fixture logits，不实例化训练权重，
+trained_inference 明确为 unverified。此前沙箱内 6 个文件用例因临时路径权限失败，
+已在获准沙箱外重跑通过；超长行静态检查失败亦已修复。
+
+官方 SAM3 revision 固定 3c879f39826c281e95690f02c7821c4de09afae7，公开元数据隐藏
+权重 SHA256。下载入口要求环境变量 HF_TOKEN 和 --download；先取得上游可信校验值，
+缺授权/哈希时不下载；需要操作者取得访问权并确认。本次只验证其 --help 与拒绝路径，
+未执行真实下载。GraspNet CUDA 扩展、两模型真实推理、显存峰值、标定及实机仍未验证。
+
+### FastSAM-x 权重下载与真实 GPU 推理（2026-10-13）
+
+用户明确允许选择 SAM3 或 FastSAM 下载。实际选择 FastSAM-x，官方 Ultralytics assets
+v8.4.0，asset 340059253，144,972,346 字节；按上游发布 API 的 SHA256 校验成功：
+752cadc2828edb1cd4bc4f9eb587100631af06ea2108f4c9ed56df4755701e76。
+清单保存来源/许可；权重存入 `.local/models/fastsam/FastSAM-x.pt`，git check-ignore 确认忽略。
+
+实际运行并通过：
+
+```powershell
+$env:WRS_AGENT_PYTHON = 'D:/code/venv312/.venv/Scripts/python.exe'
+./scripts/setup_vision.ps1
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/download_fastsam.py --download
+& '.local/venvs/vision/Scripts/python.exe' -X utf8 scripts/check_fastsam.py
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache pip check --python '.local/venvs/vision/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' --cache-dir .local/uv-cache lock --check --offline --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check scripts/download_fastsam.py scripts/check_fastsam.py --output-format concise
+```
+
+SDK 独立环境 46 包全部兼容；没有变更运行依赖版本。实际 Torch 2.9.0+cu128、
+Ultralytics 8.4.175、RTX 5060 Laptop。SDK 自带 bus.jpg（1080×810）输出 70 个掩码，
+框提示复用结果选中 1 个，掩码维度正确且数值有限。最终报告
+reports/fastsam_inference.json 的 trained_inference=passed；这是实际权重推理，
+不是前面的 fixture logits 测试。第二次命令启动的首次预测耗时 1.81 秒，PyTorch
+峰值 allocated 858.55 MiB，仅属该样例，不能当作稳态时延或完整进程显存上限。
+
+重复下载命令复核本地文件成功，无重复下载。首次 SDK 设置目录回退到临时目录，已
+提前创建项目配置目录并重跑，最终路径为 `.local/ultralytics/Ultralytics/settings.json`。
+Ruff、锁文件与 diff 检查通过。未重跑全仓测试：本次只增加权重准备/独立检查脚本，
+没有改 Runtime 或节点执行行为。没有相机/机器人连接、图片上传或付费调用。
+
+**尚未实现/验证**：FastSAM 的统一分割节点接入、文字目标定位/CLIP、桌面分割质量、
+GraspNet 真实推理及物理抓取。SAM3 权重未下载，不能宣称 SAM3 推理通过。
+
+### FastSAM 可选后端与 CLIP 实测（2026-10-13，接续上节）
+
+本轮完成统一 SegmentationNode、FastSAM 模型适配、来源字段、独立启动与图片检查
+入口；SAM3 默认值和已有启动名称兼容。CLIP ViT-B/32 复用本机缓存并核对官方哈希，
+没有新增权重下载；固定 SDK 提交及许可记录在 clip_assets.json。uv 实际生成 150 包
+锁文件，vision 环境实际 52 包依赖一致；基础解释器仍为项目指定 Python 3.12.0。
+
+实际命令：
+
+```powershell
+& '.local/venvs/vision/Scripts/python.exe' -X utf8 scripts/check_fastsam_text.py
+& '.local/venvs/vision/Scripts/python.exe' -X utf8 scripts/check_fastsam_text.py --image .local/venvs/vision/Lib/site-packages/ultralytics/assets/bus.jpg --target bus --target elephant --target person --report reports/fastsam_text_bus.json
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_fastsam.py tests/unit/test_grasp_perception.py tests/unit/test_sam3_assets.py --junitxml=reports/fastsam_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_grasp_pipeline.py tests/integration/test_visual_grasp.py tests/integration/test_vision_speech.py --junitxml=reports/fastsam_pipeline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/00_virtual_grasp.py
+& '.local/venvs/sam3/Scripts/python.exe' -X utf8 scripts/check_sam3.py --report reports/sam3_sdk_after_fastsam.json
+& '.local/tools/bin/uv.exe' lock --check --offline --cache-dir .local/uv-cache --python 'D:/code/venv312/.venv/Scripts/python.exe'
+& '.local/tools/bin/uv.exe' pip check --python .local/venvs/vision/Scripts/python.exe --cache-dir .local/uv-cache
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m ruff check wrs_agent tests examples scripts
+git -c core.safecrlf=false diff --ignore-submodules --check
+```
+
+**软件回归 PASS**：30 单元 + 6 集成，0 failed/errors/skipped；这是本轮针对性回归，
+没有重新声称全仓 834 项通过。覆盖两个后端配置下的同帧/任务来源、取消/跨任务拒绝、
+分数含义及文本权重来源、缺权重/校验失败前置拒绝、歧义与低匹配度。真实 Zenoh/WRS
+集成中的感知模型是显式 fixture。有限例子输出“虚拟抓取结果： SUCCEEDED”和虚拟抬升
+文本；新常驻入口只校验导入/配置/目录清单，未启动。SAM3 实际 SDK 张量后处理通过，
+仍未加载 SAM3 训练权重。Ruff、lock、pip check、diff 检查通过。
+
+**真实模型运行完成，但文字定位质量 FAIL**：Torch 2.9.0+cu128、Ultralytics 8.4.175，
+RTX 5060 Laptop 上加载 FastSAM-x 和 CLIP。zidane.jpg 产生 19 个候选，tie 分数 .2956
+被选择，elephant 被拒绝；人工查看保存掩码与原图，发现 tie 实际选中衬衫，领带被排除。
+bus.jpg 70 个候选，bus 被判歧义，存在的 person 被判未找到。不能用这些脚本退出 0
+声称定位正确。证据：fastsam_text.json、fastsam_text_bus.json、fastsam_text_0_mask.png、
+fastsam_mask_review.json。未对桌面数据或完整显存并发进行基准验收。
+
+首次沙箱模型探针在 Path.resolve 得到 WinError 5；沙箱单元运行出现失败后停滞，
+只清理已核对命令行的本轮 pytest 进程，在获准沙箱外重跑获得上述真实通过结果。
+本轮初始超长行检查失败，最终 Ruff 已重跑通过。
+
+**UNVERIFIED / 后续入口**：推荐下一步验证 YOLO 定位框→同帧 FastSAM 框提示，当前
+仍未接通；或取得 SAM3 访问条件后验证其原生文本定位。FastSAM/CLIP 后端保留为显式
+实验入口。GraspNet 编译环境/权重、D405、实测标定、语音真实输入输出和实机抓取仍未
+验证。用户现有 UR 文件没有在本轮修改；未提交、发布或启动真实设备。
+
+### YOLO-World 定位 → 同帧 FastSAM 框提示（2026-10-13）
+
+接续上节的 CLIP 误选证据，实现独立 locate_object 和 segment_region 技能。YOLO
+先取得完整观测，再定位并保留任务内数据；FastSAM 通过 location_id 取同一份 RGB、
+Depth、原生 XYZ。新 LocationInfo/SegmentInfo 校验观测身份、目标、任务和权重来源。
+取消发生在定位或分割中时，迟到结果都不能进入后续抓姿步骤。普通 YOLO 精确类别匹配，
+YOLO-World 接收完整短语；连续播报与按任务定位共用同一线程，并在异常后恢复原词表。
+
+实际命令：
+
+```powershell
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/unit/test_locations.py tests/unit/test_fastsam.py tests/unit/test_grasp_perception.py tests/unit/test_sam3_assets.py tests/unit/test_vision_results.py --junitxml=reports/located_grasp_unit.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_grasp_pipeline.py tests/integration/test_vision_speech.py --junitxml=reports/located_grasp_pipeline.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_visual_grasp.py --junitxml=reports/located_grasp_voice.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest -q tests/integration/test_grasp_pipeline.py -k box --junitxml=reports/located_grasp_cancel.xml
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py examples/grasping/00_virtual_grasp.py
+& '.local/venvs/vision/Scripts/python.exe' -X utf8 scripts/check_box_segmentation.py
+& '.local/venvs/vision/Scripts/python.exe' -X utf8 scripts/check_box_segmentation.py --image D:/code/test_ultralytics/images/f80a59131c9db080322649c050170f1b.jpg --target 'green pepper' --target tomato --target onion --report reports/box_segmentation_table_oriented.json
+```
+
+**PASS：46 单元 + 4 数据链/播报 + 5 语音协议/WRS = 55 项，0 failed/errors/skipped**。
+补加分割期间取消后，单独重跑 1 项通过、2 deselected，属于上述测试子集。有限例子
+已改为定位→框提示→抓姿→虚拟夹持抬升→Mock TTS，实际输出 SUCCEEDED 和虚拟抬升文本。
+语音测试覆盖原 SAM3 路径和新定位路径，使用离线 ASR/模型协议夹具；WRS 碰撞/抬升为
+真实虚拟模型运算，没有麦克风、扬声器、云模型或真实设备调用。
+收尾按当前相机的 color_grid 合同补充定位数据的两种 alignment / frame_id 往返校验，
+再运行上述单元命令取得 46 passed；消费者继续使用观测声明的网格，不改相机配置。
+
+**真实模型图片检查完成、质量仍有局限**：复用并验证本机 YOLOv8m-Worldv2（57,233,192
+字节）、CLIP、FastSAM-x，没有新增权重下载。Ultralytics 8.4.175 / Torch 2.9.0+cu128，
+RTX 5060 Laptop。bus 图唯一目标框置信度 .958，掩码/框 IoU .631；对照原图确认掩码
+覆盖可见车体、排除前景行人。elephant 拒绝、person 多目标拒绝；恢复词表后正常检测
+输出 7 项。桌面照片按 EXIF 方向解码后，green pepper / tomato 区域匹配，IoU 约
+.641 / .780；实际存在的 onion 漏检。此前原方向的 tomato 歧义和 onion 漏检报告
+保留。证据为 reports/box_segmentation.json、box_segmentation_table.json、
+box_segmentation_table_oriented.json、box_segmentation_review.json 及相应掩码。
+
+人工核对是两张图片的定性检查，没有像素标注基准；照片没有真实深度，因此不能用于
+声称 GraspNet 或物理抓取通过。真实模型探针与 fixture 集成结果分别记录，不混计。
+框提示的 IoU/分差是初始筛选参数，不代表抓取成功概率。
+
+依赖未增加，lock --check 150 包、vision pip check 52 包通过。新常驻入口
+03_start_fastsam.py / 04_start_locator.py 为代码内配置，实际没有代用户启动；原相机
+示例中的用户硬件选择保持原样。未修改用户 UR 驱动、提交或发布代码。
+全仓 Ruff、Git diff --check、示例配置导入和目录清单通过。框提示路径去掉了仅适用于
+CLIP 裁剪的小掩码过滤后，实际重跑 scripts/check_box_segmentation.py --report
+reports/box_segmentation_final.json，bus 掩码/框 IoU 仍为 .631，缺目标和歧义仍拒绝；
+SDK 对本地 settings.json 发出格式更新提示，模型版本及离线配置未变。
+
+**未完成**：GraspNet 真实 SDK/CUDA 扩展及 checkpoint；新的 vswhere 查询发现本机已有
+VS 2022 Community C++ 组件，当前 PATH 无 nvcc/cl、标准 CUDA Toolkit 目录不存在。
+还需验证兼容编译环境。D405 深度链、实测外参/工具变换、真实夹持/抬升/掉落和停止验收
+仍缺证据，完整目标未完成。SAM3 训练权重仍未下载，Graspness 尚未适配。
+
+
+## 2026-10-13：筛选提交与 GitHub 上传完成
+
+用户确认只排除密钥、账号、私有 API 地址和本机配置，保留通用接口代码。
+提交 cbd6fb9e2d7df072b5b99907475ab9dcf978cbc2 已推送 origin/main，远程哈希核对一致。
+120 文件；只纳入相机/抓取功能使用文档，ACCEPTANCE、DEPENDENCIES 的本地增量未提交。
+发现同时整理的抓取夹具引用未同步，已保留新目录并补齐引用；测试增加 Agent 发现等待。
+初次 WRS 发现失败已修复；另有虚拟抓取取消与相机首帧超时，单独复测通过，原失败保留。
+最终 785 单元、98 Zenoh、20 WRS 用例各有通过证据，20 有限例子、Ruff、doctor、
+uv lock --check --offline（152 包）、暂存扫描和 diff --check 通过；不宣称无时序波动。
+具体逐轮结果和依赖版本：reports/publish_summary.json；命令脚本：reports/publish_virtual_checks.py。
+Python 3.12.0；未运行实机、在线模型、真实音频或模型下载。所有本机设置保留。
+后续入口 examples/grasping/README.md；真实相机联合运行、实测外参与物理抓取仍需单独验收。

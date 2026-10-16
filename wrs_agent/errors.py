@@ -5,21 +5,69 @@ from pydantic import ValidationError
 from wrs_agent.schemas import ErrorInfo
 
 _MESSAGES = {
+    "segmentation_source_timeout": (
+        "分割尚未开始：连接或读取上游图像/定位数据超时。请检查故障所示节点是否可达及其负载。"
+    ),
+    "segmentation_inference_failed": "分割推理未完成，请检查模型环境和 GPU 状态。",
+    "segmentation_gpu_out_of_memory": "分割推理时 GPU 显存不足，请减少其他模型的显存占用。",
+    "invalid_segmentation_output": "分割结果格式或数值无效，不能生成目标掩码。",
+    "segmentation_grid_mismatch": "分割掩码尺寸与原始 RGB 不一致，不能匹配深度和点云。",
+    "region_mask_not_found": "FastSAM 未找到与 YOLO 定位框充分重合的掩码，请检查定位框和画面。",
+    "region_mask_ambiguous": "多个分割掩码与定位框匹配程度接近，无法唯一确定目标。",
+    "target_not_found": "当前画面未找到满足条件的目标。",
+    "target_ambiguous": "当前画面有多个符合条件的目标，请明确目标或指定方位。",
+    "too_many_segment_candidates": "分割候选数量达到上限，请减少画面杂物或调整视野。",
+    "camera_stale": "相机观测已过期，请检查相机采集是否持续更新。",
+    "segment_not_available": "暂无有效分割结果，请先完成一次分割任务。",
+    "segment_changed": "分割结果已变化，请读取最新结果。",
+    "artifact_type_mismatch": (
+        "步骤引用的结果种类不匹配。抓姿预测需要分割结果 segment_id；"
+        "请先定位、再分割，不能用 location_id 或 observation_id 代替分割结果。"
+    ),
+    "segmentation_unavailable": (
+        "GraspNet 无法读取分割结果：分割节点未就绪或不可达。"
+        "请启动 FastSAM，并确认节点连接同一环境；修改配置后需重启节点。"
+    ),
+    "observation_stale": "观测已过期，请重新进行定位和分割后再预测抓姿。",
+    "artifact_expired": "本次任务的数据已过期或被清除，请重新执行完整感知流程。",
+    "artifact_task_mismatch": "结果属于另一任务，不能用于本次推理。",
+    "artifact_invalidated": "结果因取消、节点重启或动作状态变化而失效。",
+    "insufficient_target_depth": (
+        "分割区域内有效三维点少于 64 个，无法预测抓姿。"
+        "请检查目标深度、相机距离及掩码与点云是否对齐。"
+    ),
+    "no_grasp_within_gripper_width": "没有符合当前夹爪最大开口的有效抓取候选。",
+    "invalid_graspnet_output": "GraspNet 返回的抓姿数据不符合预期格式或含无效数值。",
+    "no_grasp_in_target_roi": (
+        "GraspNet 已完成场景推理，但分割目标区域内没有抓取候选。请检查目标分割和有效深度。"
+    ),
+    "grasp_roi_not_sampled": (
+        "全场景降采样没有保留目标区域的点，尚不能判断该目标的抓取候选。"
+    ),
+    "grasp_roi_no_seed": (
+        "输入包含目标点，但 GraspNet 选取的抓取种子没有覆盖目标区域。"
+    ),
+    "grasp_roi_rejected_as_background": (
+        "目标区域有抓取种子，但模型的物体/背景判定将它们全部判为背景，解码未保留目标候选。"
+    ),
+    "grasp_inference_failed": "GraspNet 推理未完成，请检查模型环境和 GPU 状态。",
+    "grasp_gpu_out_of_memory": "GraspNet 推理时 GPU 显存不足，请减少其他模型的显存占用。",
     "llm_invalid_reply": (
         "模型返回的格式不符合所选协议；未创建任务。"
-        "请检查 LLM_PROTOCOL，并确认模型通过 propose_plan 返回单个完整计划。"
+        "请检查 LLM_PROTOCOL 和 LLM_OUTPUT_MODE，确认回复符合所选返回格式。"
     ),
     "llm_unexpected_tool": (
         "模型调用了未提供的工具；未创建任务。"
-        "模型只能调用 propose_plan，describe_objects、speak 等技能须写在 plan.steps 中。"
+        "工具模式只接受 propose_plan，JSON 模式不接受工具调用；技能须写在 plan.steps 中。"
     ),
     "llm_plan_json_invalid": (
-        "模型的 propose_plan 参数不是完整合法的 JSON；未创建任务。"
-        "请使用支持结构化工具调用的模型，参数中不能包含代码围栏或说明文字。"
+        "模型返回的计划不是完整合法的 JSON；未创建任务。"
+        "请检查模型的输出约束；支持严格结构输出的 Chat 模型可配置 "
+        "LLM_OUTPUT_MODE=json_schema，参见语音示例说明。"
     ),
     "llm_plan_invalid": (
         "模型提案不符合计划结构；未创建任务。"
-        "请按 propose_plan 的结构填写 kind、plan.steps、depends_on 和 inputs。"
+        "请按计划结构填写 kind、plan.steps、depends_on 和 inputs。"
     ),
     "llm_model_missing": (
         "请把 LLM_MODEL 设为账号上已开通的模型 ID；LLM_API_KEY 与 LLM_BASE_URL 不会选择模型。"
@@ -45,6 +93,11 @@ _MESSAGES = {
         "留空则由服务端默认。具体模型接受哪些取值以厂商文档为准。"
     ),
     "llm_tool_choice_invalid": "LLM_TOOL_CHOICE 应为 auto 或 required；留空为 auto。",
+    "llm_output_mode_invalid": (
+        "LLM_OUTPUT_MODE 应为 tools（默认）、json_object 或 json_schema；"
+        "两种 JSON 模式仅支持 openai_chat，模型服务须支持所选的输出约束。"
+    ),
+    "llm_schema_unsupported": "计划 Schema 含无法转换的字典约束；请检查模型适配器。",
     "llm_max_tokens_invalid": "LLM_MAX_TOKENS 应为 128 到 65536 之间的整数。",
     "llm_timeout_s_invalid": "LLM_TIMEOUT_S 应为大于 0、不超过 300 的秒数。",
     "llm_extra_body_invalid": "LLM_EXTRA_BODY 应为不超过 4096 字节的 JSON 对象。",
@@ -63,8 +116,8 @@ _MESSAGES = {
     ),
     "llm_http_400": (
         "模型服务拒绝了请求参数。常见原因：该模型不支持所设 LLM_REASONING_EFFORT、"
-        "LLM_TOOL_CHOICE=required、LLM_EXTRA_BODY 中的字段或 LLM_MAX_TOKENS；"
-        "可先清空这些项再试。"
+        "LLM_OUTPUT_MODE、LLM_TOOL_CHOICE=required、LLM_EXTRA_BODY 中的字段或 LLM_MAX_TOKENS；"
+        "请按该模型支持的参数检查配置。"
     ),
     "llm_http_401": "模型服务拒绝了凭据。请检查 LLM_API_KEY 与 LLM_BASE_URL 是否属于同一服务。",
     "llm_http_404": "模型服务找不到该路径或模型。请检查 LLM_BASE_URL、LLM_PROTOCOL 与 LLM_MODEL。",
@@ -117,6 +170,11 @@ _MESSAGES = {
 
 def error_info(code, **context):
     return ErrorInfo(code=code, message=_MESSAGES.get(code, code.replace("_", " ")), **context)
+
+
+def known_error_info(code):
+    """Only reviewed codes may turn an exception string into a public explanation."""
+    return error_info(code) if code in _MESSAGES else None
 
 
 class AgentError(ValueError):

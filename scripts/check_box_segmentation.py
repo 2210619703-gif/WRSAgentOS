@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-from wrs_agent.nodes.grasp.graspnet import sample_target
+from wrs_agent.nodes.grasp.graspnet import sample_scene
 from wrs_agent.nodes.segmentation.fastsam import FastSamSegmenter
 from wrs_agent.nodes.vision.locations import select_object
 from wrs_agent.nodes.vision.yolo import YoloDetector
@@ -80,7 +80,7 @@ def main():
             result.update(status="selected", box_iou=score,
                           mask=str(path), pixels=int(mask.sum()))
             if points is not None:
-                cloud = sample_target(points, mask)
+                cloud, sampled_roi = sample_scene(points, mask)
                 selected = args.report.with_name(f"{args.report.stem}_{len(outcomes)}_input.npz")
                 provenance = metadata | {
                     "observation_sha256": observation_sha256, "target": target,
@@ -91,8 +91,11 @@ def main():
                                     metadata=json.dumps(provenance))
                 valid = mask & np.isfinite(points).all(axis=2) & (points[:, :, 2] > 0)
                 result.update(grasp_input=str(selected), valid_target_points=int(valid.sum()),
-                              sampled_points=len(cloud), depth_range_m=[float(cloud[:, 2].min()),
-                                                                      float(cloud[:, 2].max())])
+                              sampled_points=len(cloud),
+                              sampled_target_points=int(sampled_roi.sum()),
+                              network_input="full_scene", depth_range_m=[
+                                  float(points[valid, 2].min()), float(points[valid, 2].max()),
+                              ])
         result["seconds"] = time.perf_counter() - began
         outcomes.append(result)
     report = {

@@ -32,7 +32,7 @@ def artifact_owner(executor):
 
 
 class ArtifactCache:
-    """At most two results and 64 MiB, including their retained complete observations."""
+    """Bounded results and retained observations; default: two results, 64 MiB, 30 seconds."""
 
     def __init__(self, *, capacity=2, max_bytes=64 * 1024 * 1024, ttl=30.0):
         if capacity < 1 or max_bytes < 1 or ttl <= 0:
@@ -43,6 +43,10 @@ class ArtifactCache:
 
     def _remove(self, key):
         self.nbytes -= self.entries.pop(key)[2]
+
+    def clear(self):
+        self.entries.clear()
+        self.nbytes = 0
 
     def expire(self):
         now = time.monotonic()

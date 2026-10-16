@@ -7,23 +7,50 @@ from pathlib import Path
 
 import numpy as np
 
+from wrs_agent.errors import AgentError, error_info
 from wrs_agent.nodes.grasp.data import GraspCandidate
 from wrs_agent.nodes.vision.artifacts import checkpoint_path
 
 
-def sample_target(points, mask, *, count=20000):
-    valid = mask & np.isfinite(points).all(axis=2) & (points[:, :, 2] > 0)
-    cloud = points[valid]
-    if len(cloud) < 64:
+def sample_scene(points, mask, *, count=20000):
+    """Sample the full scene and carry each point's original pixel ROI membership."""
+    valid = np.isfinite(points).all(axis=2) & (points[:, :, 2] > 0)
+    if np.count_nonzero(valid & mask) < 64:
         raise ValueError("insufficient_target_depth")
-    # Stable sampling makes input preparation reproducible; GPU inference may still vary.
-    rng = np.random.default_rng(0)
-    if len(cloud) >= count:
-        indices = rng.choice(len(cloud), count, replace=False)
+    pixels = np.flatnonzero(valid)
+    rng = np.random.default_rng(0)  # Stable sampling; GPU inference may still vary.
+    if len(pixels) >= count:
+        pixels = rng.choice(pixels, count, replace=False)
     else:
-        indices = np.concatenate((np.arange(len(cloud)),
-                                  rng.choice(len(cloud), count - len(cloud), replace=True)))
-    return np.ascontiguousarray(cloud[indices], dtype=np.float32)
+        pixels = np.concatenate((pixels, rng.choice(pixels, count - len(pixels), replace=True)))
+    cloud = np.ascontiguousarray(points.reshape(-1, 3)[pixels], dtype=np.float32)
+    return cloud, mask.ravel()[pixels]
+
+
+def target_rows(rows, cloud, roi, seed_indices, objectness):
+    """Follow the pinned decoder's seed order; never match a nearby object's point."""
+    if (rows.ndim != 2 or rows.shape[1] != 17 or not np.isfinite(rows).all()
+            or seed_indices.ndim != 1 or seed_indices.dtype.kind not in "iu"
+            or objectness.shape != seed_indices.shape or objectness.dtype != np.bool_
+            or np.any(seed_indices < 0) or np.any(seed_indices >= len(cloud))
+            or roi.shape != (len(cloud),) or roi.dtype != np.bool_):
+        raise ValueError("invalid_graspnet_output")
+    # pred_decode keeps only objectness==1, without changing seed order or translation.
+    indices = seed_indices[objectness]
+    if (len(rows) != len(indices)
+            or not np.allclose(rows[:, 13:16], cloud[indices], rtol=0, atol=1e-6)):
+        raise ValueError("invalid_graspnet_output")
+    selected = rows[roi[indices]]
+    if not len(selected):
+        sampled, seeded = int(roi.sum()), int(roi[seed_indices].sum())
+        code = ("grasp_roi_not_sampled" if sampled == 0 else
+                "grasp_roi_no_seed" if seeded == 0 else "grasp_roi_rejected_as_background")
+        error = error_info(code)
+        # Only bounded counts enter the public message; do not retain frame/GPU arrays.
+        counts = (f" ROI采样点 {sampled}/{len(cloud)}；ROI种子 {seeded}/{len(seed_indices)}；"
+                  f"场景候选 {len(rows)}；ROI候选 0。")
+        raise AgentError(error.model_copy(update={"message": error.message + counts}))
+    return selected
 
 
 def candidates_from_rows(rows, *, max_width_m):
@@ -82,9 +109,15 @@ class GraspNetPredictor:
         self.model.eval()
 
     def infer(self, points, mask):
-        cloud = sample_target(points, mask)
-        with self.torch.inference_mode():
-            tensor = self.torch.from_numpy(cloud[None]).to("cuda")
-            result = self.model({"point_clouds": tensor})
-            rows = self.decode(result)[0].detach().cpu().numpy()
-        return candidates_from_rows(rows, max_width_m=self.max_width_m)
+        cloud, roi = sample_scene(points, mask)
+        try:
+            with self.torch.inference_mode():
+                tensor = self.torch.from_numpy(cloud[None]).to("cuda")
+                result = self.model({"point_clouds": tensor})
+                rows = self.decode(result)[0].detach().cpu().numpy()
+                indices = result["fp2_inds"][0].detach().cpu().numpy()
+                objectness = result["objectness_score"][0].argmax(dim=0).detach().cpu().numpy()
+        except self.torch.cuda.OutOfMemoryError as exc:
+            raise ValueError("grasp_gpu_out_of_memory") from exc
+        selected = target_rows(rows, cloud, roi, indices, objectness == 1)
+        return candidates_from_rows(selected, max_width_m=self.max_width_m)

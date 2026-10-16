@@ -5,7 +5,10 @@ description: Plan observation, named-pose motion, and supported object handling 
 
 # 机器人技能
 
-根据当前可用技能选择动作。`observe` 用于读取当前证据，
+根据当前可用技能选择动作。`observe` 只刷新机器人与 Environment 的场景状态，
+不读取 CameraNode、不进行物体检测，也没有可绑定到 `speak.text` 的输出。
+场景 `objects` 为空不代表相机里没有物体。询问画面中的物体应使用可用的
+`describe_objects`；指定目标定位使用 `locate_object`。缺少视觉技能时应说明无法获取画面内容。
 `move_named_pose` 用于移动到已知姿态；支持物体操作的节点还可提供
 `pick`、`place`、`verify`。具体参数和执行条件见一起提供的 SkillSpec。
 

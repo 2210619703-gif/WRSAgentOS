@@ -10,7 +10,7 @@ from collections.abc import Mapping
 
 from pydantic import ValidationError
 
-from wrs_agent.errors import AgentError, error_info
+from wrs_agent.errors import AgentError, error_info, known_error_info
 from wrs_agent.schemas import (
     MAX_BYTES,
     ActionContext,
@@ -20,6 +20,7 @@ from wrs_agent.schemas import (
     ActionStatus,
     ControlReceipt,
     ControlRequest,
+    ErrorInfo,
     FeatureSnapshot,
     NodeSnapshot,
     SkillCheck,
@@ -32,6 +33,10 @@ from wrs_agent.store import Journal
 
 class SkillFailure(ValueError):
     """Known effect-free failure with an explicit machine-readable reason."""
+
+    def __init__(self, reason):
+        self.error = reason if isinstance(reason, ErrorInfo) else known_error_info(reason)
+        super().__init__(reason.code if isinstance(reason, ErrorInfo) else reason)
 
 
 class ExecutionUnknown(RuntimeError):
@@ -195,23 +200,25 @@ class ActionExecutor:
 
     def _status(
         self, action_id, state: ActionState, reason="", verification="PENDING", progress=None,
-        output=None,
+        output=None, error=None,
     ):
         request, old = self.records[action_id]
+        failure = None
+        if state in {ActionState.FAILED, ActionState.UNKNOWN}:
+            failure = error or error_info(
+                "execution_unknown" if state == ActionState.UNKNOWN else "action_failed",
+            )
+            failure = failure.model_copy(update={
+                "node_id": failure.node_id or self.node_id,
+                "task_id": request["task_id"], "action_id": action_id,
+                "stage": failure.stage or "observe",
+            })
         status = ActionStatus(
             action_id=action_id,
             state=state,
             sequence=old.sequence + 1,
             progress=old.progress if progress is None else progress,
-            error=error_info(
-                "execution_unknown" if state == ActionState.UNKNOWN else "action_failed",
-                node_id=self.node_id,
-                task_id=request["task_id"],
-                action_id=action_id,
-                stage="observe",
-            )
-            if state in {ActionState.FAILED, ActionState.UNKNOWN}
-            else None,
+            error=failure,
             reason=reason,
             verification=verification,
             output=output or {},
@@ -378,7 +385,7 @@ class ActionExecutor:
             self._status(aid, ActionState.UNKNOWN, "worker_cancelled", "INCONCLUSIVE")
             raise
         except SkillFailure as exc:
-            self._status(aid, ActionState.FAILED, str(exc), "FAIL")
+            self._status(aid, ActionState.FAILED, str(exc), "FAIL", error=exc.error)
         except ExecutionUnknown as exc:
             self.admission = "UNKNOWN"
             self.stop_confirmed = False

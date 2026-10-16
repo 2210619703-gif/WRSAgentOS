@@ -11,6 +11,14 @@ D405 节点到全部真实模型的联合运行及物理抓取仍未验证。
 用户入口是 [RealSense 示例 00–06](../examples/grasping/README.md)，全部顶部配置、
 无脚本参数。虚拟模型/标定只在 tests/fixtures/grasping 中供回归使用，不能用于硬件。
 
+`voice/09_viewer.py` 现可在 WRS 主场景查看实时点云与抓取快照，入口是“点云 → 抓取候选”。
+GraspNet 的 `request/grasp/latest` 返回小型 candidate_set_id/task_id/observation_id/age_s；
+后续沿用 `request/grasp/data` 读取同帧数据。发现接口同样检查动作成功、boot/epoch、
+上游分割和 TTL，不给执行授权；新推理开始后不回退显示旧任务。候选最多 8 个、点云
+最多 8192 点，预览不会重新推理。没有外参时只在明确标记的相机展示区布局，不能拿它
+判断机器人空间碰撞。语音与 grasping 示例需使用同一环境，见
+[接入说明](../examples/voice/README.md#在主场景查看点云和抓取候选)。
+
 ## 已下载的 FastSAM-x
 
 选择官方 Ultralytics assets `v8.4.0` 的 FastSAM-x（144,972,346 字节，约 145 MB）。
@@ -20,9 +28,9 @@ D405 节点到全部真实模型的联合运行及物理抓取仍未验证。
 权重位于 `.local/models/fastsam/FastSAM-x.pt`，Git 忽略。
 
 ```powershell
-$env:WRS_AGENT_PYTHON = 'python'
+$env:WRS_AGENT_PYTHON = 'D:/code/venv312/.venv/Scripts/python.exe'
 ./scripts/setup_vision.ps1
-& 'python' -X utf8 -S scripts/download_fastsam.py --download
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/download_fastsam.py --download
 & '.local/venvs/vision/Scripts/python.exe' scripts/check_fastsam.py
 ```
 
@@ -47,7 +55,7 @@ setup 安装锁定的 fastsam extra，在独立 `.local/venvs/vision` 安装 SDK
 掩码做 CLIP 排名不同。连续播报保留默认类别；目标检测在同一工作线程执行，结束或
 失败都会恢复原词表。没有再创建一套节点生命周期。
 
-本机复用 已有本地 yolov8m-worldv2.pt，57,233,192 字节，与官方 assets
+本机复用 D:/code/test_ultralytics/yolov8m-worldv2.pt，57,233,192 字节，与官方 assets
 v8.4.0 的 SHA256 一致，复制到 `.local/models/yolo/yolov8m-worldv2.pt`；没有新增下载。
 来源、哈希及 AGPL-3.0 许可清单是 `nodes/vision/assets.json`。文字编码器复用下一节
 所述的已校验 CLIP，节点禁止自动下载。新机器必须显式准备两份资产。
@@ -159,6 +167,14 @@ YOLO 同时保留原有检测/播报用途。多个目标匹配时默认失败�
 Planner 只传目标与步骤结果引用。图像、掩码、点云直接在节点间传输，不经 Agent。
 分割/YOLO 共享观测身份、像素网格和来源语义；选中掩码另带任务归属及完整观测。
 GraspNet 使用独立三维抓姿合同，分数不是概率，也不是物理抓取成功的确认。
+网络输入从同一帧的完整有效场景 XYZ 采样 20,000 点，不先按分割 mask 删除背景。
+采样同时记录原像素的 ROI 归属；推理后沿模型种子索引和 objectness 筛选顺序，将
+候选对应回分割区域，再检查夹爪宽度并取评分最高的至多 32 项。ROI 无候选时区分
+`grasp_roi_not_sampled`（采样未保留目标）、`grasp_roi_no_seed`（种子未覆盖目标）和
+`grasp_roi_rejected_as_background`（目标种子被物体/背景分类器全部拒绝）；故障详情附带
+ROI 采样点数、种子数和全场景候选数，不会用其他物体的候选替代。mask 对应的 ROI 点云仍可从
+完整 XYZ 中按同网格提取，Viewer 继续高亮这些点并显示背景。
+这一筛选只确定候选属于哪个区域，不是碰撞过滤；`collision_checked=false`。
 网格和坐标系来自 Observation.alignment / frame_id，消费者不硬编码 depth_grid。
 当前 RealSense 驱动已声明 color_grid；原 depth-optical 外参不可直接用于 color-optical。
 
@@ -178,8 +194,11 @@ task_id。生产者校验启动身份、control_epoch、原动作 SUCCEEDED 和�
 ## 内存、生命周期和时效
 
 Camera 最近两帧，每帧 RGB uint8 + Depth uint16 + XYZ float32：848×480 约 6.60 MiB。
-YOLO 定位、分割节点、GraspNet 各保留至多两份任务结果及完整观测，上限各 64 MiB，按原观测年龄
-最多 30 秒，定期清理。推理持有的输入不受相机环形缓存更新影响。
+YOLO 定位、分割节点各保留至多两份任务结果及完整观测，GraspNet 只保留最新一份；上限各
+64 MiB，按原观测年龄最多 30 秒，定期清理。GraspNet 新推理开始即释放旧结果缓存，即使
+新尝试失败，旧候选也不会恢复。需要使用当前 candidate_set_id 的步骤应在下次
+infer_grasps 前执行；旧编号随后返回 artifact_expired。正在序列化的查询可能临时持有
+旧数据，发送前仍校验缓存有效性。推理持有的输入不受相机环形缓存更新影响。
 
 这是缓存上限，**不是进程总内存上限**：模型权重、中间张量、一个在途任务及有界传输
 缓冲另占内存。每个模型只有一个工作线程/在途动作，不逐帧无限提交任务。YOLO 连续
@@ -218,7 +237,7 @@ MuJoCo 转换器应用结构忽略时可能漏掉挂载夹爪，adapter 因此�
 开发回归，通过下面的测试运行，无设备或云调用：
 
 ```powershell
-& 'python' -X utf8 -S scripts/run.py -m pytest tests/integration/test_visual_grasp.py -q
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/run.py -m pytest tests/integration/test_visual_grasp.py -q
 ```
 
 该测试保留实际 Planner / ASR / Voice 协议、Zenoh 与 WRS 虚拟几何验证，使用 tests
@@ -228,7 +247,7 @@ SAM3 使用 Transformers 图像 API，独立环境包含锁定的 Transformers 5
 Torch 2.9.0 CU128、Torchvision 0.24.0 CU128；不改变已有语音环境：
 
 ```powershell
-$env:WRS_AGENT_PYTHON = 'python'
+$env:WRS_AGENT_PYTHON = 'D:/code/venv312/.venv/Scripts/python.exe'
 ./scripts/setup_sam3.ps1
 & '.local/venvs/sam3/Scripts/python.exe' scripts/check_sam3.py --report reports/sam3_sdk.json
 ```
@@ -298,7 +317,7 @@ trained_inference；前向通过不代表模型已经能够预测可用抓姿。
 用户已明确授权非商业内部研究用途。权重下载与离线推理可复现为：
 
 ```powershell
-& 'python' -X utf8 -S scripts/download_graspnet.py --download
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 -S scripts/download_graspnet.py --download
 & '.local/venvs/graspnet/Scripts/python.exe' scripts/check_graspnet.py --weights .local/models/graspnet/checkpoint-rs.tar --sha256 60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868 --input reports/graspnet_rgbd_corrected_0_input.npz --report reports/graspnet_trained.json
 # 需要运行常驻节点时，由操作者另开终端；默认连接 FastSAM 的 segmentation 节点。
 & '.local/venvs/graspnet/Scripts/python.exe' -m examples.grasping.04_start_graspnet
@@ -313,10 +332,16 @@ pickle。该检查不执行机器人动作。源码许可限非商业内部研�
 哈希用于后续一致性检查，不代表官方哈希核验。LICENSE 和首次下载记录位于同一忽略
 目录 .local/models/graspnet；已有文件校验不匹配会拒绝，不覆盖或运行时重新下载。
 
-本机训练模型实际以 13,865 个有效香蕉点采样到 20,000 点，生成 32 个符合 .05 m
+旧目标点云模式下，本机训练模型曾以 13,865 个有效香蕉点采样到 20,000 点，生成 32 个符合 .05 m
 最大夹爪宽度的候选，开口约 .0427–.0500 m。报告保存输入文件/模型哈希、原数据来源、
 候选坐标和分数。分数为 graspnet_quality，不是成功概率；collision_checked=false，
 physical_grasp=not_tested。加载使用 weights_only=True，没有开启任意 pickle 回退。
+
+2026-10-14 已改为完整场景输入后按 ROI 筛选。同一离线香蕉样例的 20,000 个输入点中
+包含 332 个目标点及 19,668 个背景点；模型解码 217 个场景候选，ROI 保留 10 个。
+这 10 个开口为约 .0506–.0860 m，全部超过示例的 .05 m 限制，因此新流程对该样例
+会返回 `no_grasp_within_gripper_width`，不是无条件生成原来的 32 个候选。不能为了
+取得候选而将硬件例子的 MAX_WIDTH_M 改大；应按实际夹爪能力设置。
 
 语音复用已有 ASR/Voice：System.send_text(text, input_id=press_id) 交给显式启用的
 Planner，可信“停止”走本地控制。通过 WrsOptions(backend="wrs-grasp", scene=...,
@@ -324,13 +349,13 @@ grasp_calibration=...) 配置虚拟执行；回归夹具展示该配置，普通
 
 ## 尚未完成
 
-完成条件复核（2026-10-13）：
+完成条件复核（2026-10-14）：
 
 | 原目标环节 | 当前证据 | 尚缺什么 |
 |---|---|---|
 | 分割节点与 GraspNet 节点 | 实际节点/技能/同帧数据合同已实现，Zenoh 夹具链通过 | 真实 D405 节点到训练 GraspNet 的整链验收 |
 | 按物体名称定位和分割 | YOLO-World/FastSAM 本地权重实图执行；香蕉 RGB-D 输入已保存 | 更多实景质量验证；已有 onion/drill 漏检 |
-| 三维抓姿预测 | 原生扩展/9 项数值检查和训练权重香蕉推理通过，32 个候选 | 桌面实景候选质量、实际夹爪/场景碰撞验证 |
+| 三维抓姿预测 | 原生扩展检查通过；完整场景解码 217 项，香蕉 ROI 10 项，默认 50 mm 开口全部拒绝 | 桌面实景候选质量、实际夹爪/场景碰撞验证 |
 | 语音调度与播报 | 离线 ASR/Planner 协议夹具到 WRS 虚拟抓取、Mock TTS 通过 | 真实语音/模型与完整感知链的联合验收 |
 | 机器人抓取物体 | 仅 WRS 已知方块的虚拟夹持/抬升通过 | 真实视觉抓取执行适配尚未实现，实测外参/工具变换/场景碰撞/接触反馈和现场验收仍缺失 |
 

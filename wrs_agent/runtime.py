@@ -7,6 +7,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal
 
+from pydantic import ValidationError
+
 from wrs_agent.cache import PlanCache
 from wrs_agent.errors import AgentError, error_info, from_exception
 from wrs_agent.nodes.action_rpc import ActionProvider
@@ -145,6 +147,7 @@ class Runtime:
             "reason": "",
             "error": None,
             "steps": {},
+            "step_outputs": {},
             "active_actions": {},
         }
 
@@ -159,6 +162,7 @@ class Runtime:
                 reason=self.execution.reason,
                 error=self.execution.error.model_dump() if self.execution.error else None,
                 steps=dict(self.execution.results),
+                step_outputs=deepcopy(self.task.outputs),
                 active_actions=dict(self.execution.active_actions),
             )
 
@@ -194,10 +198,12 @@ class Runtime:
             "action_id": next(iter(actions.values()), None),
             "active_actions": actions,
             "steps": dict(self.execution.results),
+            "step_outputs": deepcopy(self.task.outputs) if self.task else {},
             "reason": self.execution.reason,
             "error": self.execution.error.model_dump() if self.execution.error else None,
             "planning": self.planning.state,
             "planning_request_id": self.planning.request_id,
+            "planning_reason": planning.get("reason", ""),
             "planning_error": deepcopy(planning.get("error")),
             "planner_calls": self.planner_calls,
             "last_planning": dict(self.planning.timing),
@@ -304,7 +310,7 @@ class Runtime:
         self._save_task()
         # Planning requests have an ID; a Task exists only after an executable plan is valid.
         was_running = self.execution.state == TaskState.RUNNING
-        if not was_running:
+        if self.task is None:
             self.execution.reason = ""
         self.planning.request_id = request.request_id
         self.planning.state = GoalState.WAITING
@@ -417,7 +423,16 @@ class Runtime:
             called = time.perf_counter()
             if cached is None:
                 self.planner_calls += 1
-                decision = await self.planner.plan(request)
+                try:
+                    decision = await self.planner.plan(request)
+                except ValidationError as exc:
+                    errors = exc.errors(
+                        include_input=False, include_context=False, include_url=False,
+                    )
+                    code = "llm_plan_json_invalid" if any(
+                        item["type"] == "json_invalid" for item in errors
+                    ) else "llm_plan_invalid"
+                    raise AgentError(code, stage="planning") from None
                 usage = token_counts(getattr(self.planner, "last_usage", None) or {})
             else:
                 decision = PlanDecision(kind="execute", plan=cached)
@@ -434,7 +449,7 @@ class Runtime:
             if decision.kind != "execute":
                 self.planning.state = GoalState(decision.kind.upper())
                 self.goals[request_id]["reason"] = decision.text
-                if not was_running:
+                if self.task is None:
                     self.execution.reason = decision.text
                 return
             if was_running:
@@ -472,7 +487,9 @@ class Runtime:
             failure = from_exception(exc, stage="planning")
             self.goals[request_id].update(reason=failure.message, error=failure.model_dump())
             self.cache.invalidate(goal, failure.code)
-            if not was_running:
+            # A rejected proposal has no new task. Preserve the previous execution,
+            # including its outcome/error; the goal record owns this planning failure.
+            if self.task is None:
                 self.execution.state, self.execution.reason = TaskState.FAILED, failure.message
 
         finally:

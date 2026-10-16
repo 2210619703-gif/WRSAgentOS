@@ -133,7 +133,7 @@ SKILLS = {
         _skill(
             "observe",
             Empty,
-            "Read current object and robot evidence",
+            "Refresh robot and environment state only; no camera detection and no text output",
         ),
         _skill(
             "move_named_pose",

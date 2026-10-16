@@ -15,7 +15,7 @@ from wrs_agent.nodes import Node
 from wrs_agent.nodes.agent import AgentNode
 from wrs_agent.nodes.tts.backend import SpeechState
 from wrs_agent.processes import NO_WINDOW, check_router_version, router_path
-from wrs_agent.registry import register_node
+from wrs_agent.registry import NodeRegistry, register_node
 from wrs_agent.schemas import ActionRequest, Empty, new_id
 from wrs_agent.skills import Skill
 from wrs_agent.transport import Transport
@@ -140,15 +140,36 @@ async def stop_node(system, name, worker):
     await eventually(system.nodes, lambda rows: rows[name]["health"] == "offline")
 
 
-async def test_existing_agent_and_client_accept_an_unlisted_late_node(network, start_node):
-    start_node(AgentNode, "agent")
+@pytest.mark.parametrize("missed_notifications", [False, True])
+async def test_existing_agent_and_client_accept_an_unlisted_late_node(
+    network, start_node, monkeypatch, missed_notifications,
+):
+    original_change = NodeRegistry._change
+    blocked = set()
+
+    def change(view, sample, *, historical=False, query=None):
+        if view in blocked and not historical:
+            return  # Simulate subscriber loss; liveliness queries still use the real router.
+        return original_change(view, sample, historical=historical, query=query)
+
+    monkeypatch.setattr(NodeRegistry, "_change", change)
+    agent, _ = start_node(AgentNode, "agent")
     async with System.connect(**network) as system:
         await system.registry.wait_for("agent")
         assert set(await system.nodes()) == {"agent"}
         assert await system.skills() == []
+        # Initialize the Agent's own registry before the worker joins. The client's
+        # directory being current says nothing about what the Planner can discover.
+        assert set(await system.agent.request("request/nodes", {})) == {"agent"}
+        if missed_notifications:
+            blocked.add(agent.registry)
         worker, _ = start_node(CounterNode, "late-worker")
         await system.registry.wait_for("late-worker")
         assert {item.name for item in await system.skills()} == {"count"}
+        await eventually(
+            lambda: system.agent.request("request/nodes", {}),
+            lambda rows: rows.get("late-worker", {}).get("ready"),
+        )
         direct = await system.action("count")
         assert (await direct.wait()).state == "SUCCEEDED"
         task = await system.start(step("count"))

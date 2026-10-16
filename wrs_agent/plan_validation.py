@@ -66,6 +66,22 @@ def validate_plan(plan, features, bindings):
             if (not output or not argument or output.get("type") not in
                     {"string", "number", "integer", "boolean"}
                     or output.get("type") != argument.get("type")):
-                raise AgentError("incompatible_step_output", stage="preflight")
+                why = (
+                    "来源技能未声明该输出字段" if not output else
+                    "目标技能未声明该参数" if not argument else
+                    f"输出类型 {output.get('type')} 与参数类型 {argument.get('type')} 不兼容"
+                )
+                raise AgentError(ErrorInfo(
+                    code="incompatible_step_output",
+                    message=(
+                        f"{ref.step_id}.{ref.field}（{source.name}） → "
+                        f"{step.step_id}.{parameter}（{target.name}）：{why}。"
+                    )[:240],
+                    node_id=bindings[step.skill],
+                    stage="preflight",
+                ))
+            if output.get("x-wrs-artifact") != argument.get("x-wrs-artifact"):
+                raise AgentError("artifact_type_mismatch", node_id=bindings[step.skill],
+                                 stage="preflight")
     require_ordered_resources(plan, specs)
     return plan

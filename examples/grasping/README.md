@@ -10,22 +10,25 @@
 
 | 文件 | 作用 | Python 解释器 |
 |---|---|---|
-| [00_start_router.py](00_start_router.py) | 本地 Zenoh Router | `python` |
+| [00_start_router.py](00_start_router.py) | 本地 Zenoh Router | `D:/code/venv312/.venv/Scripts/python.exe` |
 | [01_start_camera.py](01_start_camera.py) | D405 同帧 RGB、深度和 SDK 点云 | 同上 |
 | [02_start_locator.py](02_start_locator.py) | YOLO-World 按目标名称定位 | `.local/venvs/vision/Scripts/python.exe` |
 | [03_start_fastsam.py](03_start_fastsam.py) | 对定位的同一帧执行框提示分割 | 同上 |
 | [04_start_graspnet.py](04_start_graspnet.py) | 对同一帧目标 XYZ 推理抓取候选 | `.local/venvs/graspnet/Scripts/python.exe` |
-| [05_start_agent.py](05_start_agent.py) | 调度下面的固定感知任务 | `python` |
+| [05_start_agent.py](05_start_agent.py) | 调度下面的固定感知任务 | `D:/code/venv312/.venv/Scripts/python.exe` |
 | [06_propose_grasps.py](06_propose_grasps.py) | 提交一次任务并显示本次候选 | 同上 |
 
 在 06 顶部修改 `TARGET = "banana"` 为实际物体的简短英文名称，再运行即可。
 `SELECTION = "only"` 在多个匹配时拒绝；明确指定方位时才改为 `leftmost` 或 `rightmost`。
 01 默认打开真实相机；多台设备时修改 `SERIAL`。这不是离线测试入口。
+采集配置为 `WIDTH, HEIGHT, FPS = 848, 480, 30`，可在 01 顶部修改后重启相机节点。
+该频率只控制 RGB/Depth/SDK 点云采集；02–04 的推理仍由任务触发。
 
 与 camera 共用 `tcp/127.0.0.1:7449`、`wrs-demo` 和 `wrs` 会话。若 camera 的
-00、01、05 已运行，直接复用，**不要重复启动同名节点**。camera/03 与这里的 02
-都注册 `yolo`，应关闭 camera/03 后再启动本组的 YOLO-World。可用
-[camera/02_read_frame.py](../camera/02_read_frame.py) 查看 RGB，关闭预览不影响采集。
+00、01、05 已运行，直接复用，**不要重复启动同名节点**。camera/02 与这里的 02
+都注册 `yolo`，应关闭 camera/02 后再启动本组的 YOLO-World。可用
+[camera/06_read_frame.py](../camera/06_read_frame.py) 查看 RGB 和 YOLO 结果，需将其
+ENDPOINT / ENV_ID / SESSION 与本组对齐；关闭预览不影响采集。
 Router 配置复用 [camera/router.json5](../camera/router.json5)。
 
 命令行也无需添加脚本参数；例如从仓库根目录启动 GraspNet：
@@ -37,12 +40,20 @@ Router 配置复用 [camera/router.json5](../camera/router.json5)。
 基础解释器的入口可以用既有运行器，例如：
 
 ```powershell
-& 'python' -X utf8 scripts/run.py examples/grasping/01_start_camera.py
-& 'python' -X utf8 scripts/run.py examples/grasping/06_propose_grasps.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py examples/grasping/01_start_camera.py
+& 'D:/code/venv312/.venv/Scripts/python.exe' -X utf8 scripts/run.py examples/grasping/06_propose_grasps.py
 ```
 
 这里的 `-m`、`-X` 是解释器选项，例子本身不解析参数。IDE 选择表中的解释器后直接运行。
 独立模型环境都由固定基础 Python 创建；不要用 `scripts/run.py` 覆盖它们的模型依赖。
+
+GraspNet 的 `pointnet2._ext` 和 `knn_pytorch.knn_pytorch` 是编译扩展，安装在
+`.local/venvs/graspnet`，共享解释器中有 Torch 也不表示有这两个扩展。PyCharm 的
+`04_start_graspnet` 运行配置需单独选择该环境的 `Scripts/python.exe`，不要继承
+项目的共享解释器。脚本会在创建节点前检查扩展，缺失或 DLL 加载失败时显示通用
+环境提示和文档入口，不输出本机绝对路径。已有环境正常时不需要重新安装或编译；
+只有该环境本身缺扩展时
+才运行 `scripts/setup_graspnet.ps1 -BuildExtensions`，准备步骤见下方文档。
 
 ## 结果与准备
 
@@ -50,7 +61,15 @@ Router 配置复用 [camera/router.json5](../camera/router.json5)。
 本次任务的数据编号。RGB、深度、点云和分割始终绑定同一观测。它检查 RealSense
 观测和节点就绪状态；失败时显示原因，不回退到合成相机或上一轮结果。
 成功时显示候选数量、观测编号/年龄、相机坐标系、首选位置和开口。
+GraspNet 从完整有效场景点云采样 20,000 点推理，再用同帧分割 ROI 筛选目标候选，
+最后检查开口并排序；ROI 内无候选时明确失败，不使用旁边物体的抓取代替。
 模型质量分数不是成功概率，候选尚未做真实场景碰撞检查。
+
+ROI 无候选时，故障信息会列出“ROI采样点 / ROI种子 / 场景候选 / ROI候选”。
+`grasp_roi_not_sampled` 表示目标在全景采样时未被保留；`grasp_roi_no_seed` 表示已有
+目标输入点，但模型的抓取种子未覆盖它；`grasp_roi_rejected_as_background` 表示目标
+种子被模型判为背景。分割成功不保证 GraspNet 一定生成候选，不应把这三种情况统一
+解释为掩码或坐标系错误。更新诊断后需重启 04，旧失败日志不会被重写。
 
 本机已准备权重和两套模型环境，启动入口不会下载或安装。新机器的环境/模型准备
 步骤、固定资产哈希与许可见 [VISUAL_GRASP.md](../../docs/VISUAL_GRASP.md)。

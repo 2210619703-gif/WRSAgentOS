@@ -4,7 +4,7 @@ param([switch]$BuildExtensions)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
-$pythonExe = if ($env:WRS_AGENT_PYTHON) { $env:WRS_AGENT_PYTHON } else { 'python' }
+$pythonExe = 'D:/code/venv312/.venv/Scripts/python.exe'
 $uvExe = Join-Path $projectRoot '.local/tools/bin/uv.exe'
 if (-not (Test-Path -LiteralPath $uvExe)) { throw 'Run scripts/bootstrap.ps1 first.' }
 $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT

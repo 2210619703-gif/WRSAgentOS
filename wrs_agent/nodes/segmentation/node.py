@@ -10,14 +10,14 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from wrs_agent.errors import AgentError
+from wrs_agent.errors import AgentError, error_info, known_error_info
 from wrs_agent.executor import ActionExecutor, SkillFailure
 from wrs_agent.nodes.camera.client import CameraClient
 from wrs_agent.nodes.node import Node
-from wrs_agent.nodes.segmentation.data import SegmentData, SegmentInfo, pack_segment
+from wrs_agent.nodes.segmentation.data import LatestSegment, SegmentData, SegmentInfo, pack_segment
 from wrs_agent.nodes.vision.artifacts import ArtifactCache, ArtifactRequest, artifact_owner
 from wrs_agent.nodes.vision.locations import read_location
-from wrs_agent.schemas import Boundary, Name, VisionData, new_id
+from wrs_agent.schemas import Boundary, Empty, Name, VisionData, new_id
 from wrs_agent.skills.vision.grasping import SEGMENT, SEGMENT_REGION, SegmentOutput
 
 
@@ -77,6 +77,7 @@ class SegmentationNode(Node):
         self.loop = asyncio.get_running_loop()
         self.segmenter = await self.loop.run_in_executor(self.worker, self._segmenter)
         self.cache = ArtifactCache()
+        self.latest_request = None
         skill = SEGMENT_REGION if self.options.backend == "fastsam-box" else SEGMENT
         self.actions(ActionExecutor(
             self.journal, state=SegmentationState(), skills=(skill.bind(self.segment),),
@@ -87,6 +88,7 @@ class SegmentationNode(Node):
         ))
         self.transport.register_handler("request/segmentation/data", self.read, binary=True)
         self.transport.register_handler("request/segmentation/info", self.info_result)
+        self.transport.register_handler("request/segmentation/latest", self.latest)
         self.discover()
         self.spawn(self._expire())
 
@@ -99,7 +101,10 @@ class SegmentationNode(Node):
             self.cache.expire()
 
     async def segment(self, state, args, stop, progress):
+        self.latest_request = None
         owner = artifact_owner(self.executor)
+        source = (self.options.locator if self.options.backend == "fastsam-box"
+                  else self.options.camera)
         try:
             location = None
             if self.options.backend == "fastsam-box":
@@ -132,10 +137,35 @@ class SegmentationNode(Node):
             ), arrays, mask)
             self.cache.put(data.info.segment_id, owner, data, nbytes=data.nbytes,
                            observed_at=observed_at)
-        except (AgentError, ValueError, TimeoutError) as exc:
-            raise SkillFailure(str(exc)[:200]) from exc
+        except AgentError as exc:
+            # Keep discovery/ownership context; never stringify structured errors.
+            if exc.code == "request_timeout":
+                raise SkillFailure(error_info(
+                    "segmentation_source_timeout", node_id=exc.error.node_id or source,
+                    stage=exc.error.stage,
+                )) from exc
+            raise SkillFailure(exc.error) from exc
+        except TimeoutError as exc:
+            raise SkillFailure(error_info("segmentation_source_timeout", node_id=source)) from exc
+        except ValueError as exc:
+            raise SkillFailure(known_error_info(str(exc)) or
+                               error_info("invalid_segmentation_output")) from exc
+        except RuntimeError as exc:
+            raise SkillFailure(error_info("segmentation_inference_failed")) from exc
         state.completed += 1
+        self.latest_request = ArtifactRequest(artifact_id=data.info.segment_id,
+                                              task_id=owner.task_id)
         return SegmentOutput(segment_id=data.info.segment_id, observation_id=info.observation_id)
+
+    async def latest(self, payload):
+        Empty.model_validate(payload)
+        request = self.latest_request
+        if request is None:
+            raise AgentError("segment_not_available")
+        data, age = self.cache.get(request, self.executor)
+        return LatestSegment(segment_id=data.info.segment_id, task_id=data.info.owner.task_id,
+                             observation_id=data.info.observation.observation_id,
+                             age_s=age).model_dump()
 
     async def read(self, payload):
         request = ArtifactRequest.model_validate(payload)

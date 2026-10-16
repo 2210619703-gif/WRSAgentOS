@@ -1,4 +1,7 @@
 // Read-only camera panel added to the existing WRS page. No robot commands or credentials.
+import { CameraScene } from "./scene.js";
+
+const scene = new CameraScene();
 const panel = document.createElement("section");
 panel.id = "camera-panel";
 panel.setAttribute("aria-label", "相机观测");
@@ -15,8 +18,9 @@ panel.innerHTML = `
       cursor:pointer;color:#35574b} #camera-panel button[aria-pressed=true] {background:#176958;color:white}
     #camera-panel .viewport {aspect-ratio:4/3;background:#e9eeeb;display:grid;place-items:center;
       position:relative;margin:0 12px;border-radius:8px;overflow:hidden}
-    #camera-panel img,#camera-panel canvas {width:100%;height:100%;object-fit:contain;position:absolute}
-    #camera-panel canvas {touch-action:none;cursor:grab}
+    #camera-panel img {width:100%;height:100%;object-fit:contain;position:absolute}
+    #camera-panel .scene-controls {padding:0 12px 8px;display:flex;gap:6px;flex-wrap:wrap}
+    #camera-panel .scene-note {padding:8px 14px;line-height:1.7;background:#edf2ef}
     #camera-panel[hidden],#camera-panel [hidden] {display:none!important}
     #camera-panel .empty {padding:24px;text-align:center;color:#60766d;line-height:1.8}
     #camera-panel footer {padding:10px 14px;line-height:1.6;overflow-wrap:anywhere}
@@ -25,9 +29,16 @@ panel.innerHTML = `
   <nav aria-label="观测类型">
     <button data-view="rgb" aria-pressed="true">RGB</button>
     <button data-view="depth" aria-pressed="false">深度</button>
+    <button data-view="segmentation" aria-pressed="false">分割</button>
     <button data-view="points" aria-pressed="false">点云</button>
   </nav>
-  <div class="viewport"><img hidden alt="相机画面"><canvas hidden width="720" height="540"></canvas>
+  <div class="scene-controls" hidden>
+    <button data-source="live" aria-pressed="true">实时点云</button>
+    <button data-source="grasps" aria-pressed="false">抓取候选</button>
+    <button class="focus">定位点云</button>
+  </div>
+  <div class="scene-note" hidden></div>
+  <div class="viewport"><img hidden alt="相机画面">
     <div class="empty">等待相机节点连接</div></div>
   <footer><div class="detail">未收到观测</div><small class="hint">相机未连接时，机器人界面仍可使用。</small></footer>`;
 document.body.append(panel);
@@ -42,69 +53,145 @@ if (window.parent !== window) {
 }
 const status = panel.querySelector(".status"), detail = panel.querySelector(".detail");
 const hint = panel.querySelector(".hint"), empty = panel.querySelector(".empty");
-const img = panel.querySelector("img"), canvas = panel.querySelector("canvas");
-const ctx = canvas.getContext("2d");
-let current = null, selected = "rgb", yaw = 0.2, pitch = -0.15, zoom = 650, drag = null;
+const img = panel.querySelector("img"), viewport = panel.querySelector(".viewport");
+const controls = panel.querySelector(".scene-controls"), note = panel.querySelector(".scene-note");
+let current = null, selected = "rgb", graspMode = false;
+let previousFrame = null, paintedFrame = null, received = 0, fps = 0, began = performance.now();
 const states = {connecting:"连接中", offline:"节点未连接", disconnected:"相机未连接",
   stale:"观测已过期", unavailable:"观测不可用"};
-function drawPoints() {
-  ctx.fillStyle = "#e9eeeb"; ctx.fillRect(0,0,canvas.width,canvas.height);
-  if (!current?.points.length) return;
-  const points = current.points, center = [0,0,0];
-  for (const p of points) for(let j=0;j<3;j++) center[j] += p[j] / points.length;
-  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);
-  for(let i=0;i<points.length;i++) {
-    const [x,y,z] = points[i].map((v,j)=>v-center[j]);
-    const px=cy*x+sy*z, pz=-sy*x+cy*z, py=cp*y-sp*pz;
-    ctx.fillStyle = `rgb(${current.colors[i].join(",")})`;
-    ctx.fillRect(canvas.width/2+px*zoom,canvas.height/2+py*zoom,3,3);
-  }
-}
+const graspStates = {
+  artifact_expired:["抓取结果已过期", "候选及同帧点云按采集时间保留 30 秒，或被新结果替换。请重新生成后查看。"],
+  artifact_invalidated:["抓取结果已失效", "任务被取消、控制状态变化或节点重启，旧候选已清除。"],
+  grasp_not_available:["尚无抓取结果", "完成一次 infer_grasps 后可查看；查看不会触发推理。"],
+  grasp_changed:["抓取结果正在更新", "正在获取新候选，旧候选已清除。"],
+  camera_preview_stale:["抓取预览已过期", "结果超过有效期或预览查询中断，正在重新查询。"],
+  invalid_grasp_preview:["抓取数据无法显示", "候选数据或观测对应关系不正确，请检查节点日志。"],
+  grasp_node_unavailable:["抓取节点未连接", "请检查 GraspNet 节点及通信连接。"],
+};
+const requestedView = () => selected === "points" && graspMode ? "grasps" : selected;
 function render() {
-  const ready = current?.state === "ready";
+  const ready = current?.state === "ready" && current.view === requestedView();
+  viewport.hidden = selected === "points";
+  controls.hidden = note.hidden = selected !== "points";
   img.hidden = !ready || selected === "points";
-  canvas.hidden = !ready || selected !== "points";
   empty.hidden = ready;
   if (!ready) {
-    img.removeAttribute("src"); ctx.clearRect(0,0,canvas.width,canvas.height);
+    paintedFrame = null;
+    img.removeAttribute("src"); scene.clear();
     status.textContent = states[current?.state] || "连接中";
     empty.textContent = status.textContent + "。连接恢复后自动更新。";
     detail.textContent = current?.state === "offline" ? "请启动相机节点。"
       : current?.state === "disconnected" ? "请检查相机连接及节点配置。" : "等待有效观测。";
     const target = current?.connection;
+    if (selected === "segmentation") {
+      status.textContent = current?.state === "offline" ? "分割节点未连接" : "暂无有效分割结果";
+      empty.textContent = status.textContent;
+      detail.textContent = "完成一次分割任务后可查看；查看不会触发推理。";
+      hint.textContent = `绿色：选中的掩码；橙框：YOLO 定位框。`
+        + (current?.reason ? ` 当前状态：${current.reason}。` : "")
+        + "分割失败请查看“规划与执行”的故障详情。";
+      return;
+    }
+    if (selected === "points" && graspMode) {
+      const state = graspStates[current?.reason] || (current?.state === "connecting" || !current
+        ? ["正在查询抓取结果", "查看不会触发推理。"]
+        : current?.state === "offline" ? graspStates.grasp_node_unavailable
+        : ["抓取结果暂不可用", "请核对下方原因；任务成功数量可在“规划与执行 → 结果”查看。"]);
+      status.textContent = state[0];
+      empty.textContent = state[0];
+      detail.textContent = state[1];
+      hint.textContent = (target
+        ? `查询 ${target.endpoint} · ${target.env_id}/${current.grasp_node_id}。`
+        : "等待 GraspNet 结果。") + (current?.reason ? `原因：${current.reason}。` : "")
+        + "生成数量见“规划与执行 → 结果”；结果数量不代表当前仍可读取。";
+      note.textContent = status.textContent;
+      return;
+    }
+    note.textContent = empty.textContent;
     hint.textContent = target
       ? `查询 ${target.endpoint} · ${target.site}/${target.env_id} · ${target.node_id}。请核对相机节点的地址、环境和会话口令。`
       : "相机未连接时，机器人界面仍可使用。";
     return;
   }
-  status.textContent = current.source === "synthetic" ? "合成测试画面" : "已连接";
+  const source = current.source === "synthetic" ? "合成测试画面" : "已连接";
+  status.textContent = graspMode && selected === "points"
+    ? `${source} · 抓取快照` : `${source} · 接收 ${fps.toFixed(1)} FPS`;
   detail.textContent = `${current.width} × ${current.height} · ${current.frame_id}`;
-  hint.textContent = selected === "points" ? "相机坐标系（米）· 拖动旋转，滚轮缩放；非机器人世界坐标。"
+  hint.textContent = selected === "points" ? "相机坐标系（米），未标定；展示位置不代表与机器人对齐。"
     : selected === "depth" ? "深度颜色范围 0–0.6 m；黑色表示无有效深度。" : "与深度、点云来自同一观测。";
-  if (selected === "points") drawPoints(); else img.src = current[selected];
+  const key = `${selected}/${current.segment_id || current.observation_id}`;
+  if (selected === "segmentation") {
+    status.textContent = `${source} · 分割快照`;
+    detail.textContent = `${current.target} · ${current.pixel_count} 个像素 · ${current.age_s.toFixed(1)} 秒前`;
+    hint.textContent = "绿色：选中掩码；橙框：YOLO 定位。与 RGB/深度/点云属于同一观测。"
+      + "结果过期、取消或开始新分割后清除。";
+  }
+  if (selected === "points") {
+    img.removeAttribute("src");
+    try {
+      note.textContent = scene.update(current)
+        ? "已显示在主场景相机展示区；拖动场景旋转，滚轮缩放。" : "等待主场景就绪…";
+    } catch {scene.clear();note.textContent="主场景绘制失败，请刷新页面。";}
+    if (graspMode) {
+      detail.textContent = `${current.target} · 显示 ${current.grasps.length}/${current.grasp_count} 个候选`
+        + ` · 目标 ${current.segmented_point_count} 点 · 推理帧 ${current.age_s.toFixed(1)} 秒前`
+        + (Number.isFinite(current.valid_for_s) ? ` · 有效期约剩 ${current.valid_for_s.toFixed(0)} 秒` : "");
+      hint.textContent = "粉紫：分割目标；原色：同帧背景。绿：最高分抓姿；橙：其他候选。"
+        + "夹爪为示意，未做碰撞检查；相机展示区未标定到机器人。";
+    }
+    return;
+  }
+  scene.clear();
+  if (key !== paintedFrame) {
+    img.src = current[selected];
+    paintedFrame = key;
+  }
 }
-for(const button of panel.querySelectorAll("button")) button.onclick=()=>{
+function resetView() {
+  current=null; previousFrame=null; received=0; fps=0; began=performance.now();
+  scene.clear();
+  render();
+}
+for(const button of panel.querySelectorAll("button[data-view]")) button.onclick=()=>{
   selected=button.dataset.view;
-  for(const b of panel.querySelectorAll("button")) b.setAttribute("aria-pressed",String(b===button));
-  render();
+  for(const b of panel.querySelectorAll("button[data-view]")) {
+    b.setAttribute("aria-pressed",String(b===button));
+  }
+  resetView();
 };
-canvas.onpointerdown=e=>{drag=[e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId);};
-canvas.onpointermove=e=>{
-  if(!drag) return;
-  yaw+=(e.clientX-drag[0])*0.01; pitch+=(e.clientY-drag[1])*0.01;
-  drag=[e.clientX,e.clientY];drawPoints();
+for(const button of panel.querySelectorAll("button[data-source]")) button.onclick=()=>{
+  graspMode=button.dataset.source==="grasps";
+  for(const b of panel.querySelectorAll("button[data-source]")) {
+    b.setAttribute("aria-pressed",String(b===button));
+  }
+  resetView();
 };
-canvas.onpointerup=canvas.onpointercancel=()=>{drag=null;};
-canvas.addEventListener("wheel",e=>{
-  e.preventDefault();zoom=Math.max(100,Math.min(6000,zoom*Math.exp(-e.deltaY*0.001)));drawPoints();
-},{passive:false});
+panel.querySelector(".focus").onclick=()=>scene.focus();
+window.addEventListener("pagehide",()=>scene.clear());
 async function poll() {
+  const started=performance.now(), view=requestedView();
   try {
-    const response=await fetch("/camera/preview",{cache:"no-store",signal:AbortSignal.timeout(1500)});
+    const response=await fetch(`/camera/preview?view=${view}`,
+      {cache:"no-store",signal:AbortSignal.timeout(1500)});
     if(!response.ok) throw Error("preview unavailable");
-    current=await response.json();
-  } catch {current={state:"offline",reason:"页面相机服务无响应"};}
-  render();
-  setTimeout(poll,250); // At most one request in flight, including while disconnected.
+    const value=await response.json();
+    if(view===requestedView()) {
+      current=value;
+      if(current.state==="ready" && current.observation_id!==previousFrame) {
+        received++; previousFrame=current.observation_id;
+      }
+    }
+  } catch {
+    if(view===requestedView()) current={state:"offline",reason:"页面相机服务无响应"};
+  }
+  if(view===requestedView()) {
+    const now=performance.now();
+    if(current?.state!=="ready") {fps=0;received=0;previousFrame=null;began=now;}
+    else if(now-began>=1000) {fps=received*1000/(now-began);received=0;began=now;}
+    render();
+  }
+  // One request in flight; subtract work time instead of adding a delay after every frame.
+  const interval=current?.state==="ready" ? 1000/current.preview_fps : 250;
+  setTimeout(poll,view!==requestedView() ? 0 : Math.max(1,interval-(performance.now()-started)));
 }
 poll();

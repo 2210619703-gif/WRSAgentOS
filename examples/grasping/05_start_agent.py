@@ -5,9 +5,9 @@ import asyncio
 from examples._session import use_local_token
 from wrs_agent.nodes.serve import serve_node
 
-ENDPOINT = "tcp/127.0.0.1:7449"
-ENV_ID = "wrs-demo"
-SESSION = "wrs"
+ENDPOINT = "tcp/127.0.0.1:7451"
+ENV_ID = "voice-goal"
+SESSION = "voice"
 
 
 async def main():

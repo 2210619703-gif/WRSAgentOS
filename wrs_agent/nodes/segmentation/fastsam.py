@@ -37,11 +37,14 @@ class FastSamSegmenter:
 
     def masks(self, rgb):
         torch = self.torch
-        result, = self.model.predict(
-            np.ascontiguousarray(rgb[:, :, ::-1]),
-            device=0 if self.device == "cuda" else "cpu", conf=self.confidence,
-            imgsz=640, iou=.9, max_det=100, retina_masks=True, save=False, verbose=False,
-        )
+        try:
+            result, = self.model.predict(
+                np.ascontiguousarray(rgb[:, :, ::-1]),
+                device=0 if self.device == "cuda" else "cpu", conf=self.confidence,
+                imgsz=640, iou=.9, max_det=100, retina_masks=True, save=False, verbose=False,
+            )
+        except torch.cuda.OutOfMemoryError as exc:
+            raise ValueError("segmentation_gpu_out_of_memory") from exc
         if result.masks is None:
             raise ValueError("target_not_found")
         if len(result.masks) >= 100:
