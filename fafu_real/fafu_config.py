@@ -2,9 +2,9 @@
 
 改完直接运行::
 
-    python fafu_real/main.py              # 按 RUN_MODE 运行
-    python fafu_real/main.py --mode read_joints
-    python fafu_real/main.py --mode sequence --execute
+    python fafu_real/robot/main.py              # 按 RUN_MODE 运行
+    python fafu_real/robot/main.py --mode read_joints
+    python fafu_real/robot/main.py --mode sequence --execute
 
 命令行 ``--mode`` / ``--execute`` / ``--dry-run`` / ``--skills`` / ``--no-skills``
 会临时覆盖本文件。
@@ -21,8 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # ---------------------------------------------------------------------------
 # 1. 依赖的比赛仓库（wrs-competition 的 wrs-demo 分支）
 # ---------------------------------------------------------------------------
-# 里面要有：fafu_arm_sdk-main/（SDK + robot.cfg + fafu_motor.pyd）、demo/real/（RealArm、D405、
-# servo_j）、wrs/（含 Panthera-HT 模型和 meshes1/*.stl 网格）。环境变量 WRS_COMPETITION_DIR 优先。
+# 电机和夹爪用本仓库 fafu_arm_sdk（Python 3.12 的 fafu_motor.cp312）。
+# 这里只给运动学：wrs/ 里的 Panthera-HT。环境变量 WRS_COMPETITION_DIR 优先。
 COMPETITION_ROOT = os.environ.get("WRS_COMPETITION_DIR") or r"F:\wrs-main-competition"
 
 # ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ EXECUTE_ON_REAL = False
 USE_SERVO_J = True
 # 串口；None = robot.cfg 里的 port（默认 auto）。
 SERIAL_PORT = None
-# 关节速度档（1~40，和 demo/real 的 speed 一样，10 ≈ 18°/s）。首次上电保持低速。
+# 关节速度百分比（100 = π rad/s，10 ≈ 18°/s）。首次上电保持低速。
 MOVE_SPEED = 5
 # 下探、合爪附近、搅拌、倾倒这些贴近物体的段用更慢的档。
 CONTACT_SPEED = 3
@@ -104,7 +104,7 @@ TASK_SEQUENCE = [
 # ---------------------------------------------------------------------------
 # 4. 命名位形（关节角，度，J1~J6）
 # ---------------------------------------------------------------------------
-# 用 read_joints 读真机：python fafu_real/read_joints.py --save look
+# 用 read_joints 读真机：python fafu_real/robot/read_joints.py --save look
 # --save 写进 taught_poses.json，会覆盖这里同名的值。B / C 是 place 技能的两个放置位。
 NAMED_POSES_DEG = {
     "home": (0.79, 0.07, 0.22, -5.69, 5.58, -0.40),
@@ -160,9 +160,29 @@ PRESS_DEPTH_M = 0.01  # set_control 按键默认按下深度
 # 6. 眼在手上（D405 装在法兰上），和比赛 demo 同一种标定
 # ---------------------------------------------------------------------------
 HANDEYE_JSON = os.path.join(HERE, "handeye_eye_in_hand.json")
+# D405。序列号空着就用当前接上的那一台。分辨率是这台相机的中等档。
 CAMERA_RESOLUTION = "mid"
 CAMERA_SERIAL = None
+CAMERA_WIDTH = 848
+CAMERA_HEIGHT = 480
+CAMERA_FPS = 30
 MAX_DEPTH_M = 1.2
+
+# YOLO-World + CLIP。权重在本仓库 .local/models，不进 Git。
+# YOLO_DEVICE 只能是 "cpu" 或显卡序号；"0" 是这台 RTX 4060。
+_MODELS = os.path.join(os.path.dirname(HERE), ".local", "models")
+YOLO_WEIGHTS = os.path.join(_MODELS, "yolo", "yolov8m-worldv2.pt")
+CLIP_WEIGHTS = os.path.join(_MODELS, "fastsam", "ViT-B-32.pt")
+FASTSAM_WEIGHTS = os.path.join(_MODELS, "fastsam", "FastSAM-x.pt")
+YOLO_PROMPTS = ("bowl", "strainer", "pot", "noodles", "spoon", "plate")
+YOLO_CONFIDENCE = 0.35
+YOLO_IOU = 0.50
+YOLO_IMGSZ = 640
+YOLO_DEVICE = "0"
+# 自己训练出来的检测权重。watch.py --yolo / vision.py --yolo 用这份，不加载 CLIP。
+TRAINED_WEIGHTS = os.path.join(HERE, "vision", "dataset", "weights", "best.pt")
+FASTSAM_DEVICE = "cuda"
+FASTSAM_CONFIDENCE = 0.4
 # 标定窗口里显示点云的世界范围
 WORKSPACE_BOUNDS_M = {"x": (0.0, 0.6), "y": (-0.4, 0.4), "z": (-0.05, 0.45)}
 
@@ -203,6 +223,6 @@ def named_pose_rad(name: str) -> list[float]:
     poses = named_poses_deg()
     if name not in poses:
         raise ConfigError(
-            f"没有命名位形 {name!r}。先摆到位后运行 python fafu_real/read_joints.py --save {name}"
+            f"没有命名位形 {name!r}。先摆到位后运行 python fafu_real/robot/read_joints.py --save {name}"
         )
     return [math.radians(v) for v in poses[name]]

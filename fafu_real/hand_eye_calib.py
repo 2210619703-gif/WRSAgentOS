@@ -213,7 +213,7 @@ class EyeInHandCalib:
             f"[calib] 相机 xyz [{cam[0, 3]:+.4f}, {cam[1, 3]:+.4f}, {cam[2, 3]:+.4f}] m，"
             f"视线 [{cam[0, 2]:+.3f}, {cam[1, 2]:+.3f}, {cam[2, 2]:+.3f}]"
         )
-        self.log("[calib] 记成命名位形：python fafu_real/read_joints.py --save look")
+        self.log("[calib] 记成命名位形：python fafu_real/robot/read_joints.py --save look")
 
     def _apply_world_delta(self, dT_world: np.ndarray) -> None:
         w2r = self._flange_homomat()
@@ -389,7 +389,7 @@ def main(argv=None) -> int:
 
     import wrs.modeling.geometric_model as mgm
     import wrs.visualization.panda.world as wd
-    from d405_camera import CameraError, D405Camera
+    from camera import CameraError, D405Camera
     from wrs.robot_sim.robots.panthera_ht.panthera_ht_single_arm import PantheraHTSglArm
 
     init_mat = handeye.load_raw(args.out)
@@ -409,23 +409,17 @@ def main(argv=None) -> int:
     arm, joint_source = None, None
     rest_conf = np.asarray(C.named_pose_rad(args.pose), dtype=float)
     if not args.no_connect:
-        from real_arm import RealArm, RealArmError
-        from real_config import RealConfigError, load_real_config
+        from arm import Arm
 
         try:
-            arm = RealArm(
-                load_real_config(),
-                dry_run=False,
-                speed=1,
-                port=args.port,
-                use_servo=False,
-                release_mode=C.RELEASE_MODE_ON_CLOSE,
-            )
+            if args.port:
+                C.SERIAL_PORT = args.port
+            arm = Arm(execute=True)
             arm.connect()
             joint_source = arm.joint_values
             print(f"[calib] 真机当前关节 {format_deg(arm.joint_values())}")
             print("[calib] 手推机械臂时仿真会跟着动，点云按当前法兰 FK 变换")
-        except (RealArmError, RealConfigError, RuntimeError) as e:
+        except RuntimeError as e:
             print(
                 f"[calib] 连真机失败：{e}\n[calib] 退回命名位形 {args.pose}，点云不会跟真机法兰走"
             )
