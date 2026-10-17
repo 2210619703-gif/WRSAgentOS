@@ -229,7 +229,7 @@ UNSUPPORTED = {
     ),
     **dict.fromkeys(
         ("pour", "stir", "scoop", "shake_off"),
-        "No taught trajectory has been recorded for this scene.",
+        "Computed in wrs_motion but not registered on this node yet.",
     ),
     "collision_planning": "No collision-checked path in this kinematic profile.",
 }

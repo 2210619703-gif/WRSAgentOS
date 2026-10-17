@@ -517,12 +517,41 @@ function renderRobot(data) {
   box.querySelectorAll("[data-allow]").forEach((b) => { b.onclick = () => act(() => post("/api/allow")); });
 }
 
-function field(name, prop, required) {
+// Arguments that name an object in the loaded scene. Their choices follow that scene.
+const SCENE_ARGS = {
+  pick: ["object"],
+  place: ["object"],
+  verify: ["object"],
+  reorient: ["object"],
+  place_on: ["object", "surface"],
+  seat_in: ["object", "container"],
+  set_control: ["appliance"],
+  pour: ["source", "target"],
+  stir: ["tool", "vessel"],
+  scoop: ["tool", "source", "target"],
+  shake_off: ["object"],
+};
+
+function sceneObjects(data) {
+  const objects = (data.robot && data.robot.objects) || {};
+  return Object.keys(objects).sort().map((name) => ({
+    name,
+    label: objects[name] && objects[name] !== name ? `${name}（${objects[name]}）` : name,
+  }));
+}
+
+function field(skill, name, prop, required, objects) {
   const label = `${esc(name)}${required ? " *" : ""}`;
   const title = esc(prop.description || "");
   if (prop.enum) {
     const opts = prop.enum.map((v) => `<option value="${esc(v)}"${v === prop.default ? " selected" : ""}>${esc(v)}</option>`).join("");
     return `<label title="${title}">${label}<select name="${esc(name)}">${opts}</select></label>`;
+  }
+  if ((SCENE_ARGS[skill] || []).includes(name)) {
+    const opts = objects.length
+      ? `<option value="">请选择</option>${objects.map((item) => `<option value="${esc(item.name)}">${esc(item.label)}</option>`).join("")}`
+      : `<option value="">场景里没有物体</option>`;
+    return `<label title="${title}">${label}<select name="${esc(name)}"${required ? " required" : ""}>${opts}</select></label>`;
   }
   if (prop.type === "boolean") {
     return `<label title="${title}">${label}<select name="${esc(name)}"><option>false</option><option${prop.default ? " selected" : ""}>true</option></select></label>`;
@@ -540,8 +569,15 @@ function field(name, prop, required) {
 }
 
 function renderSkills(data) {
-  const key = JSON.stringify(data.skills.map((s) => [s.name, s.version]));
+  const objects = sceneObjects(data);
+  const key = JSON.stringify([data.skills.map((s) => [s.name, s.version]), objects.map((item) => item.name)]);
   if (key === skillsKey) return;
+  const saved = new Map();
+  for (const card of $("skills").querySelectorAll("form[data-skill]")) {
+    const values = {};
+    for (const el of card.querySelectorAll("[name]")) values[el.name] = el.value;
+    saved.set(card.dataset.skill, values);
+  }
   skillsKey = key;
   const box = $("skills");
   if (!data.skills.length) {
@@ -554,10 +590,18 @@ function renderSkills(data) {
     const required = new Set((spec.parameters && spec.parameters.required) || []);
     const card = document.createElement("form");
     card.className = "skill-card";
+    card.dataset.skill = spec.name;
     card.innerHTML = `<div class="name">${esc(spec.name)} <span class="meta">v${esc(spec.version)} · ${esc((spec.resources || []).join(", "))}</span></div>
       <div class="desc">${esc(spec.description)}</div>
-      ${Object.keys(props).length ? `<div class="args">${Object.entries(props).map(([n, p]) => field(n, p, required.has(n))).join("")}</div>` : ""}
+      ${Object.keys(props).length ? `<div class="args">${Object.entries(props).map(([n, p]) => field(spec.name, n, p, required.has(n), objects)).join("")}</div>` : ""}
       <button class="run" type="submit">执行</button>`;
+    const previous = saved.get(spec.name) || {};
+    for (const el of card.querySelectorAll("[name]")) {
+      const value = previous[el.name];
+      if (value == null) continue;
+      if (el.tagName === "SELECT" && ![...el.options].some((option) => option.value === value)) continue;
+      el.value = value;
+    }
     card.onsubmit = (e) => {
       e.preventDefault();
       const args = {};

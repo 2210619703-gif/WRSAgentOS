@@ -27,4 +27,4 @@ WRS 虚拟节点提供观察、命名姿态和 `move_relative`。相对移动以
 放在表面上（桌面、盘子、灶面）用 `place_on`；放进容器内部或盖上锅用 `seat_in`，不要用 `place_on` 代替，否则会停在边沿上。
 煮面示例：`pick(strainer)` → `reorient(strainer, upright)` → `seat_in(strainer, pot)` → `pick(noodles)` → `seat_in(noodles, strainer)`，后一步依赖前一步。
 `set_control` 开关灶具，执行时夹爪必须为空。
-`pour`、`stir`、`scoop`、`shake_off` 是示教动作，只在节点提供时使用，不能用 `move_relative` 拼出来。
+`pour`、`stir`、`scoop`、`shake_off` 由节点根据物体位姿计算并做碰撞检测，执行前后物体都留在夹爪里，需要先 `pick` 源容器或工具；只在节点提供时使用，不能用 `move_relative` 拼出来。容器里的内容物不做仿真，倒和舀的成功只说明动作完成，不说明东西真的倒进去了。

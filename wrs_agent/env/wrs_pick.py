@@ -5,6 +5,7 @@ Upright boxes only. The jaw-width rule is a virtual contact assumption, never a 
 
 import asyncio
 import contextlib
+from functools import partial
 
 import numpy as np
 
@@ -68,9 +69,10 @@ class VirtualPickPlace:
         self.kind = self.object_id = self.switch_at = self.goal = None
         self.path = []
 
-    def _collider(self, moving):
+    def _collider(self, moving, *, skip=()):
         model, robot, gripper = self.model, self.model.robot, self.model.gripper
-        fixtures = [obj for name, (_, obj) in model.objects.items() if name != moving]
+        fixtures = [obj for name, (_, obj) in model.objects.items()
+                    if name != moving and name not in skip]
         collider = robot.build_collider(fixtures=fixtures, objects=[model.objects[moving][1]])
         # This WRS converter does not apply the mounted DH50's finger-pair ignores.
         collider.acm += tuple((gripper.runtime_lnks[a], gripper.runtime_lnks[b])
@@ -271,13 +273,19 @@ class VirtualPickPlace:
 
 
 async def advance_pick_place(call, planner, skill, state, args, stop, progress):
+    if skill == "pick":
+        plan = partial(planner.plan_pick, args.object)
+    elif state.held != args.object:
+        raise SkillFailure("object_not_held")
+    else:
+        plan = partial(planner.plan_place, args.surface)
+    return await run_plan(call, planner, plan, args.object, state, stop, progress)
+
+
+async def run_plan(call, planner, plan, object_id, state, stop, progress):
+    """Plan on the model worker, then play the path one step at a time and verify it."""
     try:
-        if skill == "pick":
-            count = await call(planner.plan_pick, args.object)
-        elif state.held != args.object:
-            raise SkillFailure("object_not_held")
-        else:
-            count = await call(planner.plan_place, args.surface)
+        count = await call(plan)
     except SkillFailure:
         raise  # Planning restored the model; nothing moved.
     except Exception:
@@ -289,7 +297,7 @@ async def advance_pick_place(call, planner, skill, state, args, stop, progress):
             if stop.is_set():
                 return False
             state.kinematics, obj, state.held = await call(planner.step, index)
-            state.objects[args.object] = obj
+            state.objects[object_id] = obj
             state.version += 1
             progress((index + 1) / count)
             with contextlib.suppress(TimeoutError):

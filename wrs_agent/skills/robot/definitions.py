@@ -207,36 +207,32 @@ SKILLS = {
         _skill(
             "pour",
             PourArgs,
-            "Taught motion: tilt the held source container over the target until it is "
-            "emptied, then return it upright and still held",
-            preconditions=("source_held", "target_visible", "taught_trajectory"),
-            verification="taught_trajectory_postcondition",
+            "Carry the held source above the observed target and tilt its opening past "
+            "horizontal to empty it, then return it upright and still held",
+            preconditions=("source_held", "target_visible"),
             timeout=30.0,
         ),
         _skill(
             "stir",
             StirArgs,
-            "Taught motion: stir inside the observed vessel with the held tool; the tool "
-            "stays in the gripper",
-            preconditions=("tool_held", "vessel_visible", "taught_trajectory"),
-            verification="taught_trajectory_postcondition",
+            "Lower the held tool through the observed vessel's opening and circle inside "
+            "it, then lift it out; the tool stays in the gripper",
+            preconditions=("tool_held", "vessel_visible"),
             timeout=60.0,
         ),
         _skill(
             "scoop",
             ScoopArgs,
-            "Taught motion: scoop one portion from the source with the held tool and "
-            "release it into the target",
-            preconditions=("tool_held", "source_visible", "target_visible", "taught_trajectory"),
-            verification="taught_trajectory_postcondition",
+            "Dip the held tool into the source, sweep and lift one portion, then tilt it "
+            "over the target to release it; the tool stays in the gripper",
+            preconditions=("tool_held", "source_visible", "target_visible"),
             timeout=30.0,
         ),
         _skill(
             "shake_off",
             PickArgs,
-            "Taught motion: lift and shake the held strainer to drain it; it stays held",
-            preconditions=("object_held", "taught_trajectory"),
-            verification="taught_trajectory_postcondition",
+            "Lift the held strainer and shake it side to side to drain it; it stays held",
+            preconditions=("object_held",),
             timeout=20.0,
         ),
     )
