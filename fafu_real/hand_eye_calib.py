@@ -103,7 +103,7 @@ def format_deg(q) -> str:
 
 
 def attach_scene(base) -> None:
-    """kitchen_scene 里的物体（按 at_deg 算出的位置）画成半透明长方体，用来对点云。"""
+    """场景里的物体画成半透明长方体，用来对点云。位置来自示教关节角或占位。"""
     import wrs.modeling.geometric_model as mgm
     from kinematics import Kinematics
     from world import World

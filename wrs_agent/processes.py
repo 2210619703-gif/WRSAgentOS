@@ -262,7 +262,7 @@ class LocalStack:
             # Dependent nodes share the model loader's deadline, including Voice -> ASR.
             startup_seconds = 300 if any(
                 getattr(self.options[role], "backend", None) == "qwen" for role in self.roles
-            ) else 10
+            ) else 120 if self.backend == "wrs" else 10
             async with asyncio.TaskGroup() as readiness:
                 for node_id in self.roles.values():
                     readiness.create_task(self._wait_ready(node_id, seconds=startup_seconds))

@@ -532,6 +532,21 @@ const SCENE_ARGS = {
   shake_off: ["object"],
 };
 
+// Kitchen dropdowns only offer roles that already succeed in the food sequence.
+const KITCHEN_CHOICES = {
+  pick: { object: ["bowl_support", "bowl_support_2", "skimmer"] },
+  place_on: {
+    object: ["bowl_support", "bowl_support_2", "skimmer"],
+    surface: ["bowl_rack", "bowl_rack_2", "skimmer_holder"],
+  },
+  seat_in: { object: ["skimmer"], container: ["pot"] },
+  pour: {
+    source: ["bowl_support", "bowl_support_2", "skimmer"],
+    target: ["skimmer", "bowl_support", "bowl_support_2"],
+  },
+  shake_off: { object: ["skimmer"] },
+};
+
 function sceneObjects(data) {
   const objects = (data.robot && data.robot.objects) || {};
   return Object.keys(objects).sort().map((name) => ({
@@ -540,8 +555,17 @@ function sceneObjects(data) {
   }));
 }
 
+function choicesFor(skill, name, objects, data) {
+  const present = (data.robot && data.robot.objects) || {};
+  const allowed = present.skimmer && present.pot && KITCHEN_CHOICES[skill] && KITCHEN_CHOICES[skill][name];
+  if (!allowed) return objects;
+  const keep = new Set(allowed);
+  return objects.filter((item) => keep.has(item.name));
+}
+
 function field(skill, name, prop, required, objects) {
-  const label = `${esc(name)}${required ? " *" : ""}`;
+  const shown = prop.title && prop.title !== name ? prop.title : name;
+  const label = `${esc(shown)}${required ? " *" : ""}`;
   const title = esc(prop.description || "");
   if (prop.enum) {
     const opts = prop.enum.map((v) => `<option value="${esc(v)}"${v === prop.default ? " selected" : ""}>${esc(v)}</option>`).join("");
@@ -593,7 +617,7 @@ function renderSkills(data) {
     card.dataset.skill = spec.name;
     card.innerHTML = `<div class="name">${esc(spec.name)} <span class="meta">v${esc(spec.version)} · ${esc((spec.resources || []).join(", "))}</span></div>
       <div class="desc">${esc(spec.description)}</div>
-      ${Object.keys(props).length ? `<div class="args">${Object.entries(props).map(([n, p]) => field(spec.name, n, p, required.has(n), objects)).join("")}</div>` : ""}
+      ${Object.keys(props).length ? `<div class="args">${Object.entries(props).map(([n, p]) => field(spec.name, n, p, required.has(n), choicesFor(spec.name, n, objects, data))).join("")}</div>` : ""}
       <button class="run" type="submit">执行</button>`;
     const previous = saved.get(spec.name) || {};
     for (const el of card.querySelectorAll("[name]")) {

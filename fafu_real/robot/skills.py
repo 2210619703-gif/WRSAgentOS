@@ -26,9 +26,10 @@ if _REAL not in sys.path:
 
 import _paths  # noqa: F401
 import fafu_config as C
+import kitchen_scene
 import numpy as np
 from arm import Arm, Stopped
-from kinematics import FLIP_Z, Kinematics, down_rot, homo, interpolate, rot_z
+from kinematics import FLIP_Z, Kinematics, down_rot, homo, interpolate, lerp_joints, rot_z
 from motions import Plan, PlanError, Planner
 from pydantic import create_model
 from world import SceneError, World
@@ -99,6 +100,24 @@ class Robot:
         self.lock = threading.Lock()
         self.poses = C.named_poses_deg()
 
+    def locate_with_yolo(self) -> None:
+        """先到观察位，再用识别结果覆盖看见的物体。没看见的留示教关节角。"""
+        import time
+
+        from vision.locate import LocateError, detect_objects
+
+        self.log("[yolo] 先到观察位 look。看见的物体用识别位置，其余仍用示教关节角。")
+        if not self.run_skill("move_named_pose", {"pose": "look"}):
+            raise LocateError("到不了观察位 look，没有改用识别位置")
+        time.sleep(0.4)
+        q = self.sync()
+        hits = detect_objects(q, self.kin.flange, self.log)
+        self.world.override_from_vision(hits, self.log)
+        seen = {name for name, _, _ in hits}
+        missed = [name for name in self.world.items if name != "table" and name not in seen]
+        if missed:
+            self.log("[yolo] 没看见，仍用示教关节角：" + "、".join(missed))
+
     # -- 生命周期 ----------------------------------------------------------
     def connect(self) -> Robot:
         self.arm.connect()
@@ -122,7 +141,10 @@ class Robot:
             self.log(f"[exit] 手上还有 {self.world.held}，不回 {C.EXIT_POSE}，原地保持")
             return
         self.log(f"[exit] 回 {C.EXIT_POSE}")
-        self.run_skill("move_named_pose", {"pose": C.EXIT_POSE})
+        try:
+            self.run_skill("move_named_pose", {"pose": C.EXIT_POSE})
+        except SkillFailure as exc:
+            self.log(f"[exit] 回不去 {C.EXIT_POSE}：{exc}。停在当前位置，继续保持通电")
 
     # -- 对外入口 ----------------------------------------------------------
     def run_skill(self, name: str, args: dict, stop=None, progress=None) -> bool:
@@ -379,7 +401,149 @@ def _grasp_spec(item) -> dict:
     }
 
 
+def _require_points(step, names):
+    have = {name for name, _deg in step["points"]}
+    missing = [name for name in names if name not in have]
+    if missing:
+        raise PlanError(f"{step['id']} 缺少关键点 {'、'.join(missing)}")
+
+
+def _joints_rad(r: Robot, step_id: str, name: str, deg) -> list[float]:
+    values = tuple(deg)
+    if len(values) != 6:
+        raise PlanError(f"{step_id}.{name} 要 6 个关节角，现在是 {deg!r}")
+    target = [math.radians(float(v)) for v in values]
+    if not r.kin.within_limits(target):
+        raise PlanError(f"{step_id}.{name} 超出关节限位")
+    return target
+
+
+def _maybe_taught(r: Robot, skill: str, args):
+    """这一步在 kitchen_scene.STEPS 里、并且关节角已经填满时，按示教走。"""
+    hits = kitchen_scene.match_steps(skill, args, r.world)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        raise PlanError("多个示教步骤都匹配：" + "、".join(step["id"] for step in hits))
+    step = hits[0]
+    gap = kitchen_scene.point_gap(step)
+    if len(gap) == len(step["points"]):
+        r.log(f"[taught] {step['label']} 的关节角还没记，这一步仍按物体位置规划")
+        return None
+    if gap:
+        raise PlanError(
+            f"{step['id']} 还有点没记：{'、'.join(gap)}。"
+            "摆好后运行 python fafu_real/robot/read_joints.py --step "
+            f"{step['id']} --point 点名 ，或用 --teach 逐点写入；不用的点整行删掉"
+        )
+    r.log("[taught] " + step["label"] + " 按示教关节角走：" + " → ".join(n for n, _ in step["points"]))
+    return _plan_taught(r, step)
+
+
+def _bind_pick(r: Robot, name: str, tf):
+    def attach(name=name, tf=tf):
+        r.world.held = name
+        r.world.grasp_tf = tf.copy()
+        r.world.items[name].container = None
+
+    return attach
+
+
+def _bind_release(r: Robot, name: str, q_release, container):
+    def release(name=name, q_release=list(q_release), container=container):
+        tcp = r.kin.tcp(q_release)
+        r.world.move(name, tcp @ r.world.grasp_tf)
+        r.world.held = None
+        r.world.grasp_tf = None
+        r.world.items[name].container = container
+
+    return release
+
+
+def _bind_upright(r: Robot, name: str, q_up):
+    def effect(name=name, q_up=list(q_up)):
+        tcp = r.kin.tcp(q_up)
+        pos = (tcp @ r.world.grasp_tf)[:3, 3]
+        pose = homo(np.eye(3), pos)
+        r.world.grasp_tf = np.linalg.inv(tcp) @ pose
+        r.world.items[name].pose = pose
+
+    return effect
+
+
+def _bind_emptied(r: Robot, source: str, target_name: str):
+    def emptied(source=source, target_name=target_name):
+        target = r.world.items[target_name]
+        contents = [n for n in r.world.contents(source) if r.world.items[n].container == source]
+        for n in contents:
+            moved = r.world.items[n]
+            if target.kind == "container":
+                floor = max(
+                    [
+                        target.bottom() + C.PLACE_GAP_M,
+                        *(r.world.items[c].top() for c in r.world.contents(target_name)),
+                    ]
+                )
+                moved.container = target_name
+            else:
+                floor = target.top()
+                moved.container = None
+            moved.pose = homo(np.eye(3), (*target.pose[:2, 3], floor + moved.half[2]))
+
+    return emptied
+
+
+def _plan_taught(r: Robot, step: dict) -> Plan:
+    """按 kitchen_scene 里记下的关节角走。grasp / release / tilt / upright 在到达后触发。"""
+    skill, args = step["skill"], step["args"]
+    if skill == "pick":
+        r.need_empty()
+        item = r.world.item(args["object"])
+        if item.kind in {"table", "appliance"} or not item.grasp:
+            raise PlanError(f"{args['object']}_not_graspable")
+        _require_points(step, ("grasp",))
+    elif skill in {"seat_in", "place_on", "shake_off"}:
+        r.held_as(args["object"])
+        if skill != "shake_off":
+            _require_points(step, ("release",))
+    elif skill == "pour":
+        r.held_as(args["source"])
+        _require_points(step, ("tilt", "upright"))
+    else:
+        raise PlanError(f"taught_unsupported:{skill}")
+
+    plan = Plan()
+    if skill == "pick":
+        plan.add("open", "张爪", C.JAW_OPEN_M)
+    q = list(r.q)
+    for name, deg in step["points"]:
+        prev = q
+        target = _joints_rad(r, step["id"], name, deg)
+        path = lerp_joints(prev, target)
+        slow = name in {"grasp", "release", "tilt"}
+        plan.move(f"{step['label']}·{name}", path, C.CONTACT_SPEED if slow else C.MOVE_SPEED)
+        q = target
+        if name == "grasp":
+            plan.add("grasp", "合爪", _grasp_spec(r.world.item(args["object"])), Planner.back(path, prev))
+            tcp = r.kin.tcp(target)
+            tf = np.linalg.inv(tcp) @ r.world.item(args["object"]).pose
+            plan.add("effect", "记为抓住", _bind_pick(r, args["object"], tf))
+        elif name == "release":
+            plan.add("open", "张爪放下", C.JAW_OPEN_M)
+            container = args.get("container") if skill == "seat_in" else None
+            plan.add("effect", "放下", _bind_release(r, args["object"], target, container))
+        elif name == "tilt":
+            plan.add("wait", "停一会儿", C.POUR_DWELL_S)
+            plan.add("effect", "内容物倒出", _bind_emptied(r, args["source"], args["target"]))
+        elif name == "upright":
+            plan.add("effect", "记为口朝上", _bind_upright(r, args["source"], target))
+    return plan
+
+
 def plan_pick(r: Robot, args):
+    taught = _maybe_taught(r, "pick", args)
+    if taught is not None:
+        return taught
     r.need_empty()
     name = args.object
     item = r.world.item(name)
@@ -480,6 +644,9 @@ def plan_reorient(r: Robot, args):
 
 
 def plan_place_on(r: Robot, args):
+    taught = _maybe_taught(r, "place_on", args)
+    if taught is not None:
+        return taught
     name, surface = args.object, args.surface
     r.held_as(name)
     item, base = r.world.items[name], r.world.item(surface)
@@ -507,6 +674,9 @@ def plan_place_on(r: Robot, args):
 
 
 def plan_seat_in(r: Robot, args):
+    taught = _maybe_taught(r, "seat_in", args)
+    if taught is not None:
+        return taught
     name, cname = args.object, args.container
     r.held_as(name)
     item, box = r.world.items[name], r.world.item(cname)
@@ -575,6 +745,9 @@ def plan_set_control(r: Robot, args):
 
 
 def plan_pour(r: Robot, args):
+    taught = _maybe_taught(r, "pour", args)
+    if taught is not None:
+        return taught
     name, tname = args.source, args.target
     held = r.held_as(name)
     item, target = r.world.items[name], r.world.item(tname)
@@ -733,6 +906,9 @@ def plan_scoop(r: Robot, args):
 
 
 def plan_shake_off(r: Robot, args):
+    taught = _maybe_taught(r, "shake_off", args)
+    if taught is not None:
+        return taught
     name = args.object
     held = r.held_as(name)
     q0 = r.q
@@ -744,7 +920,7 @@ def plan_shake_off(r: Robot, args):
     for lift in (C.SHAKE_LIFT_M, C.SHAKE_LIFT_M / 2, 0.0):
         T_up = _lifted(T0, lift)
         frames = []
-        for _ in range(C.SHAKE_CYCLES):
+        for _ in range(int(args.times)):
             for s in (1.0, -1.0):
                 frames.append(_shifted(T_up, side * s * C.SHAKE_AMPLITUDE_M))
         frames.append(T_up)
@@ -869,7 +1045,8 @@ def make_executor(r: Robot, journal_path) -> ActionExecutor:
             "stop_scope": "between_path_segments",
             "controller_flush": False,
             "unsupported": {
-                "perception": "Object poses come from fafu_real/robot/kitchen_scene.py, not the camera.",
+                "perception": "With --yolo, a seen object uses the camera pose. "
+                "Cooking steps use kitchen_scene.STEPS joint angles once they are filled in.",
                 "arm_collision": "Only the gripper and held object are collision checked, "
                 "not the arm links.",
                 "contents_physics": "Container contents move in the world state only.",

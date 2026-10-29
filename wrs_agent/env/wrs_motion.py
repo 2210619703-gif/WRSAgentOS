@@ -169,9 +169,10 @@ class VirtualKitchen(VirtualPickPlace):
 
         return self._plan(source, build)
 
-    def plan_shake_off(self, object_id):
+    def plan_shake_off(self, object_id, cycles=None):
         self._held(object_id, "object_not_held")
-        lift, amplitude, cycles = SHAKE
+        lift, amplitude, default_cycles = SHAKE
+        cycles = default_cycles if cycles is None else int(cycles)
 
         def build(tcp, current, grasp, start):
             collider = self._collider(object_id)
@@ -256,7 +257,7 @@ async def advance_motion(call, planner, skill, state, args, stop, progress):
     elif skill == "scoop":
         held, plan = args.tool, partial(planner.plan_scoop, args.tool, args.source, args.target)
     else:
-        held, plan = args.object, partial(planner.plan_shake_off, args.object)
+        held, plan = args.object, partial(planner.plan_shake_off, args.object, args.times)
     if state.held != held:
         raise SkillFailure("object_not_held")
     return await run_plan(call, planner, plan, held, state, stop, progress)

@@ -38,8 +38,9 @@ class SceneView:
         self._status("starting", "正在加载 WRS 模型…")
         _bypass_proxy_for_loopback()
         try:
+            snapshot = await self._first_snapshot()
             wrs = await asyncio.to_thread(load_wrs)
-            await asyncio.to_thread(self._build, wrs)
+            await asyncio.to_thread(self._build, wrs, snapshot)
         except Exception as exc:
             self._status("failed", f"WRS 画面不可用：{type(exc).__name__}: {exc}")
             return
@@ -66,30 +67,89 @@ class SceneView:
             hub.cancel()
             await asyncio.gather(hub, return_exceptions=True)
 
-    def _build(self, wrs):
+    async def _first_snapshot(self):
+        for _ in range(600):
+            snapshot = self.dashboard.robot
+            if snapshot is not None and snapshot.data.kind == "scene":
+                return snapshot
+            await asyncio.sleep(0.1)
+        return None
+
+    def _build(self, wrs, snapshot):
+        facts = {} if snapshot is None else dict(snapshot.data.facts)
+        objects = {} if snapshot is None else snapshot.data.objects
+        fafu = facts.get("robot_model") == "fafu_baseV1"
+        kitchen = "skimmer" in objects and "pot" in objects
+        if fafu and kitchen:
+            camera = ((1.65, -1.85, 1.55), (0.3, 0.0, 0.23))
+        else:
+            camera = ((1.8, 1.4, 1.2), (0.3, 0.0, 0.35))
         world = wrs.wvw.World(
-            cam_pos=(1.8, 1.4, 1.2), cam_lookat_pos=(0.3, 0, 0.35),
+            cam_pos=camera[0], cam_lookat_pos=camera[1],
             port=self.port, hz=10, auto_start_hub=False,
         )
-        world.set_caption("WRS-Agent · UI 节点")
-        robot, gripper = wrs.ur_ur7e.ur7e_with_gripper()
+        world.set_caption("WRS-Agent · 厨具技能" if kitchen else "WRS-Agent · UI 节点")
+        jaw = None
+        gripper = None
+        if fafu:
+            from wrs_agent.env.fafu import load_model
+            from wrs_agent.env.kitchen_motion import _prepare_jaws, jaw_mesh
+
+            loaded = load_model()
+            robot = loaded[1]
+            import tomllib
+            from pathlib import Path
+
+            import numpy as np
+
+            profile = tomllib.loads(
+                (Path(__file__).parents[2] / "assets/fafu/profile.toml").read_text(encoding="utf-8")
+            )
+            robot.set_pos_rotmat(pos=profile["base_pos"])
+            joint_index = {joint.name: index for index, joint in enumerate(robot.structure.jnts)}
+            joint_ids = [joint_index[f"joint{number}"] for number in range(1, 7)]
+
+            def apply(q):
+                # Display the simulated joints even when they sit outside the URDF limits.
+                full = np.zeros_like(robot.qs)
+                full[joint_ids] = q
+                robot.fk(full)
+
+            class _Arm:
+                pass
+
+            holder = _Arm()
+            holder.robot = robot
+            visual, open_geom, mid, closed = _prepare_jaws(holder)
+            jaw = (visual, open_geom, mid, closed)
+        else:
+            robot, gripper = wrs.ur_ur7e.ur7e_with_gripper()
         robot.add_to_scene(world.scene)
         wrs.wssop.frame().add_to_scene(world.scene)
         displayed = {}
         board = self.dashboard
 
-        def update(dt):
+        def update(_dt):
             # Display only: the latest snapshot comes from the dashboard's own polling.
-            snapshot = board.robot
-            if snapshot is None or snapshot.data.kind != "scene":
+            current = board.robot
+            if current is None or current.data.kind != "scene":
                 return
             try:
-                state = snapshot.data.robot.kinematics
+                state = current.data.robot.kinematics
                 if state is not None and state.valid:
-                    robot.fk(state.qs)
-                    if state.gripper_width is not None:
-                        gripper.set_opening(state.gripper_width)
-                sync_scene_objects(wrs, world.scene, snapshot.data.objects, displayed)
+                    if fafu:
+                        apply(list(state.qs))
+                        if jaw is not None:
+                            visual.geom = jaw_mesh(
+                                *jaw[1:],
+                                float(current.data.facts.get("jaw") or 0.0),
+                                float(current.data.facts.get("jaw_gap") or 0.016),
+                            )
+                    else:
+                        robot.fk(state.qs)
+                        if gripper is not None and state.gripper_width is not None:
+                            gripper.set_opening(state.gripper_width)
+                sync_scene_objects(wrs, world.scene, current.data.objects, displayed)
             except Exception as exc:
                 self._status("failed", f"画面刷新失败：{type(exc).__name__}: {exc}")
 

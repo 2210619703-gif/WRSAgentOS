@@ -28,7 +28,7 @@ class SceneError(ValueError):
 
 
 # 各物体的大致外形，只用于避碰和算“放到哪 / 倒在哪”，粗略即可，不用现场量。
-# 位置不看这里，看 kitchen_scene.py 的 at_deg；placeholder 只在没记 at_deg 时给离线 check 用。
+# 煮面步骤的关节角在 kitchen_scene.STEPS。这里的 placeholder 只给还没记示教角时的离线规划用。
 # 以后接视觉，尺寸由识别结果给出，这张表就不用了。
 _SHAPES = {
     "table": {"size": (0.80, 0.90, 0.04), "placeholder": (0.30, 0.0, -0.02)},
@@ -39,11 +39,25 @@ _SHAPES = {
     },
     "pot": {"size": (0.15, 0.15, 0.08), "seat_depth_m": 0.04, "placeholder": (0.27, -0.14, 0.05)},
     "strainer": {
-        "size": (0.08, 0.08, 0.05),
-        "grasp_offset": (-0.035, 0.0, 0.015),
-        "placeholder": (0.20, 0.12, 0.025),
+        "size": (0.135, 0.120, 0.135),
+        "grasp_offset": (-0.069, -0.279, 0.003),
+        "close_axis_deg": 0.0,
+        "placeholder": (0.20, 0.12, 0.068),
     },
     "noodles": {"size": (0.03, 0.04, 0.03), "placeholder": (0.15, 0.03, 0.015)},
+    "bowl_raw": {
+        "size": (0.168, 0.168, 0.085),
+        "grasp_offset": (0.123, 0.0, 0.008),
+        "close_axis_deg": 90.0,
+        "seat_depth_m": 0.02,
+        "placeholder": (0.18, 0.16, 0.043),
+    },
+    "bowl_serve": {
+        "size": (0.12, 0.12, 0.06),
+        "grasp_offset": (0.045, 0.0, 0.02),
+        "seat_depth_m": 0.02,
+        "placeholder": (0.18, -0.16, 0.03),
+    },
     "plate": {"size": (0.12, 0.12, 0.016), "placeholder": (0.325, 0.12, 0.008)},
     "spoon": {
         "size": (0.02, 0.02, 0.10),
@@ -52,6 +66,21 @@ _SHAPES = {
         "placeholder": (0.14, 0.20, 0.05),
     },
 }
+
+
+def _mesh_shapes() -> dict:
+    """生食碗和漏勺的尺寸、把手抓取点以 STL 为准。文件缺失时仍用上面的手写值。"""
+    try:
+        from vision.stl_grasp import mesh_shapes
+    except ImportError:
+        return {}
+    try:
+        return mesh_shapes()
+    except (OSError, ValueError) as exc:
+        print(f"[scene] 读不到 STL，生食碗和漏勺仍用默认抓取点：{exc}")
+        return {}
+
+
 _DEFAULT_SIZE = {
     "table": (0.80, 0.90, 0.04),
     "surface": (0.12, 0.12, 0.02),
@@ -134,8 +163,20 @@ class World:
     @classmethod
     def from_config(cls, objects=None):
         items = {}
+        mesh = _mesh_shapes()
         for name, entry in (objects or kitchen_scene.OBJECTS).items():
             spec = {**_SHAPES.get(name, {}), **entry}
+            if name in mesh:
+                spec.update(mesh[name])
+                placeholder = spec.get("placeholder")
+                if placeholder is not None:
+                    half_z = float(spec["size"][2]) / 2.0
+                    if float(placeholder[2]) < half_z:
+                        spec["placeholder"] = (
+                            float(placeholder[0]),
+                            float(placeholder[1]),
+                            half_z,
+                        )
             kind = spec.get("kind")
             if kind not in _DEFAULT_SIZE:
                 raise SceneError(f"{name}: kind 不认识：{kind!r}")
@@ -244,6 +285,37 @@ class World:
             logger(
                 f"[scene] {item.name} 由关节角得到{where} "
                 f"[{touched[0]:+.3f}, {touched[1]:+.3f}, {touched[2]:+.3f}]"
+            )
+        self.home = {name: it.pose.copy() for name, it in self.items.items()}
+
+    def override_from_vision(self, hits, logger=print) -> None:
+        """用识别结果改物体位置。没给出朝向时，表面点当成顶面中心，朝向保持原样。
+
+        ``hits`` 是 (名字, xyz, 置信度) 或 (名字, 物体中心 xyz, 置信度, 朝向弧度)。
+        带朝向的点已经是物体中心，用于把手对上了 STL 的生食碗和漏勺。
+        """
+        for hit in hits:
+            name, surface, score = hit[0], hit[1], hit[2]
+            yaw = hit[3] if len(hit) > 3 else None
+            if name not in self.items:
+                logger(f"[yolo] 场景里没有 {name}，忽略")
+                continue
+            item = self.items[name]
+            point = np.asarray(surface, dtype=float)
+            pose = item.pose.copy()
+            if yaw is None:
+                center = point.copy()
+                center[2] -= float(item.half[2])
+                where = "表面"
+            else:
+                center = point.copy()
+                pose[:3, :3] = rot_z(float(yaw))
+                where = f"把手朝向 {math.degrees(float(yaw)):+.0f}°，中心"
+            pose[:3, 3] = center
+            self.move(name, pose)
+            logger(
+                f"[yolo] {name} 优先用识别位置（{score:.2f}）"
+                f" {where} [{point[0]:+.3f}, {point[1]:+.3f}, {point[2]:+.3f}]"
             )
         self.home = {name: it.pose.copy() for name, it in self.items.items()}
 

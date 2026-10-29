@@ -1,4 +1,4 @@
-"""实机（fafu / Panthera-HT）开关与参数。厨具、面条的位置（关节角）在 kitchen_scene.py。
+"""实机（fafu / Panthera-HT）开关与参数。煮面每一步的关键关节角在 kitchen_scene.py。
 
 改完直接运行::
 
@@ -29,7 +29,7 @@ COMPETITION_ROOT = os.environ.get("WRS_COMPETITION_DIR") or r"F:\wrs-main-compet
 # 2. 基本开关
 # ---------------------------------------------------------------------------
 # True 才真的给机械臂下发；False = dry-run，只规划、打印，不连硬件。
-EXECUTE_ON_REAL = False
+EXECUTE_ON_REAL = True
 # 走 servo_j 连续喂帧（和比赛 demo 一样）。False 退回逐点 move_j。
 USE_SERVO_J = True
 # 串口；None = robot.cfg 里的 port（默认 auto）。
@@ -61,9 +61,10 @@ DRY_RUN_START_POSE = "home"
 # skill        执行一个技能 SKILL_NAME(**SKILL_ARGS)
 # sequence     依次执行 TASK_SEQUENCE（默认是煮面流程）
 # check        强制 dry-run，把 TASK_SEQUENCE 和每个技能都规划一遍，不连硬件
+# command      终端打印「请输入指令」。制作食物＝整段；说某一步就只做那一步
 # node         作为 WRSAgentOS 机器人节点上线，看板 / Agent 通过技能调用
 # calib        眼在手上手眼标定（D405 + 真机）
-RUN_MODE = "read_joints"
+RUN_MODE = "goto_pose"
 RUN_MODES = (
     "read_joints",
     "goto_pose",
@@ -71,6 +72,7 @@ RUN_MODES = (
     "gripper",
     "skill",
     "sequence",
+    "command",
     "check",
     "node",
     "calib",
@@ -79,7 +81,7 @@ RUN_MODES = (
 # False：直接调用底层运动，不检查手里有没有东西，只用于调试。skill / sequence / node 始终用技能。
 USE_SKILLS = True
 
-MOVE_POSE = "look"
+MOVE_POSE = "home"
 MOVE_OBJECT = "pot"
 MOVE_ABOVE_M = 0.10
 GRIPPER_COMMAND = "open"
@@ -87,13 +89,14 @@ GRIPPER_COMMAND = "open"
 SKILL_NAME = "pick"
 SKILL_ARGS = {"object": "strainer"}
 
-# 煮面：漏勺进锅 → 面进漏勺 → 漏勺出锅、沥水 → 倒到盘子 → 漏勺放回桌上。
+# 煮面：面进漏勺 → 漏勺进锅 → 捞出、沥水 → 倒到盘子 → 漏勺放回桌上。
+# 每一步的关节角在 kitchen_scene.STEPS。填好后按示教走，没填时仍按物体位置规划。
 TASK_SEQUENCE = [
     ("move_named_pose", {"pose": "home"}),
-    ("pick", {"object": "strainer"}),
-    ("seat_in", {"object": "strainer", "container": "pot"}),
     ("pick", {"object": "noodles"}),
     ("seat_in", {"object": "noodles", "container": "strainer"}),
+    ("pick", {"object": "strainer"}),
+    ("seat_in", {"object": "strainer", "container": "pot"}),
     ("pick", {"object": "strainer"}),
     ("shake_off", {"object": "strainer"}),
     ("pour", {"source": "strainer", "target": "plate"}),
@@ -109,7 +112,7 @@ TASK_SEQUENCE = [
 NAMED_POSES_DEG = {
     "home": (0.79, 0.07, 0.22, -5.69, 5.58, -0.40),
     "zero": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-    "look": (9.33, 71.74, 78.36, -85.76, 0.41, 13.11),
+    "look": (66.53, 63.76, 101.23, -91.04, 17.96, 16.99),
 }
 TAUGHT_POSES_JSON = os.path.join(HERE, "taught_poses.json")
 
@@ -139,13 +142,17 @@ JAW_OPEN_M = 0.055  # 夹爪最大开口（与 demo/real 的 SIM_JAW_OPEN_MAX �
 #                 close_m 只是标称值。夹不稳加 force，夹得太狠减 force。
 GRIP = {
     "noodles": {"mode": "pinch", "close_m": 0.025, "effort": 70},
-    "strainer": {"mode": "force", "close_m": 0.010, "force": 160, "effort": 220},
+    # 漏勺把手大约 2 厘米厚，沿模型的 X 向合拢。
+    "strainer": {"mode": "force", "close_m": 0.018, "force": 160, "effort": 220},
     "spoon": {"mode": "force", "close_m": 0.015, "force": 160, "effort": 220},
+    # 生食碗抓把手（约 3 厘米宽，两指沿把手侧面合拢）。盛出碗没有这只模型，仍夹碗沿。
+    "bowl_raw": {"mode": "force", "close_m": 0.024, "force": 140, "effort": 200},
+    "bowl_serve": {"mode": "force", "close_m": 0.008, "force": 140, "effort": 200},
 }
 
 POUR_ABOVE_M = 0.04  # 倾倒时手上物体最低点离目标顶面的高度
 # 依次尝试的倾倒角。过 90° 口才朝下；竖直顶抓漏勺边沿时这台臂离线算只能倾到约 85~90°，
-# 想倒得更干净就把漏勺 at_deg 记在把手上 / 斜着抓。
+# 想倒得更干净，把 kitchen_scene 里倒到盘子的 tilt 记在漏勺已经口朝下的姿态。
 POUR_TILT_DEG = (120.0, 100.0, 90.0, 85.0)
 POUR_DWELL_S = 1.5  # 倾倒到底后停多久
 STIR_TURNS = 2
@@ -179,8 +186,12 @@ YOLO_CONFIDENCE = 0.35
 YOLO_IOU = 0.50
 YOLO_IMGSZ = 640
 YOLO_DEVICE = "0"
-# 自己训练出来的检测权重。watch.py --yolo / vision.py --yolo 用这份，不加载 CLIP。
+# 自己训练出来的检测权重。不加载 CLIP。
+# 默认这份；没有的话用 fafu_real/vision/ 下唯一的 best*.pt（例如 best(3).pt）。
 TRAINED_WEIGHTS = os.path.join(HERE, "vision", "dataset", "weights", "best.pt")
+# True 时真机先到 look 再识别。看见的物体用识别位置。煮面步骤的关节角填在 kitchen_scene.STEPS。
+# 命令行 --yolo 打开这一项。离线 check 不会开相机。
+USE_YOLO = False
 FASTSAM_DEVICE = "cuda"
 FASTSAM_CONFIDENCE = 0.4
 # 标定窗口里显示点云的世界范围

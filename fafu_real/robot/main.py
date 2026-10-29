@@ -5,7 +5,8 @@
     python fafu_real/robot/main.py --mode goto_pose --pose look --execute
     python fafu_real/robot/main.py --mode skill --skill pick --args object=noodles
     python fafu_real/robot/main.py --mode skill --skill seat_in --args object=noodles container=strainer
-    python fafu_real/robot/main.py --mode sequence --execute
+    python fafu_real/robot/main.py --execute
+    python fafu_real/robot/main.py --mode sequence --execute --yolo
     python fafu_real/robot/main.py --mode node --execute
 
 ``--execute`` / ``--dry-run`` 覆盖 EXECUTE_ON_REAL；``--skills`` / ``--no-skills`` 覆盖 USE_SKILLS。
@@ -45,8 +46,12 @@ def _parse(argv):
     p.add_argument("--skill", default=C.SKILL_NAME)
     p.add_argument("--args", nargs="+", default=None,
                    help="skill 模式的参数：object=noodles surface=plate，或一段 JSON；默认 SKILL_ARGS")
+    p.add_argument("--yolo", action="store_true", help="真机先识别；看见的物体优先于示教关节角")
     p.add_argument("--no-confirm", action="store_true", help="真机执行时不逐步确认")
     p.add_argument("--no-ui", action="store_true", help="node 模式不起看板")
+    p.add_argument("--teach", action="store_true", help="read_joints：逐点摆臂并写入 kitchen_scene.py")
+    p.add_argument("--step", default=None, help="read_joints：写入的步骤名，要和 --point 一起用")
+    p.add_argument("--point", default=None, help="read_joints：写入的点名，例如 grasp")
     return p.parse_args(argv)
 
 
@@ -141,6 +146,59 @@ def mode_skill(robot, opts) -> bool:
     return run_step(robot, opts.skill, args)
 
 
+def mode_command(robot, opts) -> bool:
+    """先问一句指令。整段煮面会先识别；同一次运行里再说下一步，手里的东西还在。"""
+    from commands import help_text, parse_command
+    from vision.locate import LocateError
+
+    located = False
+
+    def locate_once() -> bool:
+        nonlocal located
+        if located:
+            return True
+        if not robot.execute:
+            print("[指令] 没加 --execute，跳过识别，只用示教位置")
+            located = True
+            return True
+        try:
+            robot.locate_with_yolo()
+        except LocateError as exc:
+            print(f"[指令] 识别失败：{exc}")
+            return False
+        located = True
+        return True
+
+    print(help_text())
+    while True:
+        print("请输入指令")
+        try:
+            line = input("> ")
+        except EOFError:
+            print()
+            return True
+        kind, *rest = parse_command(line)
+        if kind == "empty":
+            continue
+        if kind == "quit":
+            print("[指令] 结束")
+            return True
+        if kind == "unknown":
+            print("[指令] 没对上。整段说「帮我制作一下食物」，或只说下面的某一步。")
+            print(help_text())
+            continue
+        if kind == "ambiguous":
+            print("[指令] 一次只做一步，请分开说。")
+            continue
+        if not locate_once():
+            continue
+        if kind == "sequence":
+            mode_sequence(robot, opts)
+            continue
+        _name, args = rest
+        run_step(robot, _name, args)
+
+
 def mode_sequence(robot, opts, steps=None) -> bool:
     for name, args in steps or C.TASK_SEQUENCE:
         if not run_step(robot, name, args):
@@ -198,10 +256,18 @@ def main(argv=None) -> int:
     opts.use_skills = C.USE_SKILLS if opts.use_skills is None else opts.use_skills
     if opts.mode == "check":
         execute = False
+        opts.yolo = False
     if opts.mode == "read_joints":
         import read_joints
 
-        return read_joints.main([] if execute else ["--dry-run"])
+        forwarded = [] if execute else ["--dry-run"]
+        if opts.teach:
+            forwarded.append("--teach")
+        if opts.step:
+            forwarded += ["--step", opts.step]
+        if opts.point:
+            forwarded += ["--point", opts.point]
+        return read_joints.main(forwarded)
     if opts.mode == "calib":
         import hand_eye_calib
 
@@ -218,6 +284,11 @@ def main(argv=None) -> int:
     robot.connect()
     q = robot.world.qs
     print("[main] 当前关节(°) " + ", ".join(f"{math.degrees(v):.2f}" for v in q))
+    use_yolo = (opts.yolo or C.USE_YOLO) and opts.mode != "command"
+    if use_yolo and not execute:
+        raise SystemExit("[yolo] 识别要看真机上的桌子，请加上 --execute")
+    if use_yolo:
+        robot.locate_with_yolo()
     ok = True
     try:
         if opts.mode == "node":
@@ -226,7 +297,8 @@ def main(argv=None) -> int:
             return node.run(robot, with_ui=not opts.no_ui)
         handler = {
             "goto_pose": mode_goto_pose, "goto_object": mode_goto_object, "gripper": mode_gripper,
-            "skill": mode_skill, "sequence": mode_sequence, "check": mode_check,
+            "skill": mode_skill, "sequence": mode_sequence, "command": mode_command,
+            "check": mode_check,
         }[opts.mode]
         ok = handler(robot, opts)
         if opts.mode not in {"check"} and execute:
@@ -237,8 +309,7 @@ def main(argv=None) -> int:
         ok = False
     except Exception:
         traceback.print_exc()
-        if execute:
-            robot.arm.estop()
+        print("[main] 出错后不急停，关节角继续下发，臂保持通电")
         ok = False
     finally:
         robot.close()

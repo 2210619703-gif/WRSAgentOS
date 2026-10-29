@@ -13,6 +13,11 @@ from wrs_agent.skills import lookup_skills
 from wrs_agent.system import step
 
 ROLES = ("wrs", "agent", "voice", "tts", "asr")
+# Kitchen pages list the skills the scene can run. stir, scoop and reorient wait.
+KITCHEN_SKILLS = (
+    "observe", "move_named_pose", "move_relative", "set_gripper",
+    "pick", "place_on", "seat_in", "pour", "shake_off",
+)
 REACHABLE = {"ready", "held"}
 # These planning verdicts carry text in the overview's reason; DONE/IDLE reasons may be stale.
 REPLIED = {"ANSWER", "CLARIFY", "FAILED", "STALE", "REQUIRES_CONFIRMATION"}
@@ -129,6 +134,17 @@ class Dashboard:
         self._workers.add(task)
         task.add_done_callback(self._workers.discard)
         return task
+
+    def _visible_skills(self):
+        robot = self.robot
+        if (
+            robot is not None
+            and robot.data.kind == "scene"
+            and {"skimmer", "pot"} <= set(robot.data.objects)
+        ):
+            allowed = set(KITCHEN_SKILLS)
+            return [spec for spec in self.skills if spec["name"] in allowed]
+        return list(self.skills)
 
     def online(self, role):
         """A held robot still answers snapshots and allow_actions, so it counts as online."""
@@ -274,7 +290,7 @@ class Dashboard:
             },
             "busy": busy,
             "robot": None if robot is None else self._robot_view(robot),
-            "skills": self.skills,
+            "skills": self._visible_skills(),
             "planner": self.planner,
             "voice": dict(self.voice),
             "viewer": dict(self.viewer),
@@ -367,7 +383,7 @@ class Dashboard:
             return self._reply(False, describe(exc))
 
     async def run_skill(self, skill, args):
-        spec = next((item for item in self.skills if item["name"] == skill), None)
+        spec = next((item for item in self._visible_skills() if item["name"] == skill), None)
         if spec is None:
             return {"ok": False, "message": f"没有已发现的技能 {skill}。"}
         try:

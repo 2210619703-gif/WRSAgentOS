@@ -69,7 +69,7 @@ def test_gripper_contract_accepts_only_open_or_close_and_denies_grasp_claims():
         ("pour", {"source": "measuring_cup", "target": "pot"}),
         ("stir", {"tool": "spoon", "vessel": "pot"}),
         ("scoop", {"tool": "ladle", "source": "pot", "target": "bowl"}),
-        ("shake_off", {"object": "strainer"}),
+        ("shake_off", {"object": "strainer", "times": 3}),
     ],
 )
 def test_cooking_contracts_take_observed_names_only(skill, args):

@@ -38,7 +38,8 @@ F:\Python312\python.exe fafu_real\vision\watch.py --yolo
 |---|---|
 | `watch.py` | 实时窗口。`--live` 只看彩色和深度，`--yolo` 用训练好的 `best.pt` |
 | `vision.py` | 拍一帧，可选检测 |
+| `locate.py` | 真机 `--yolo` 时：检测框经手眼变成世界坐标，覆盖看见的物体 |
 | `perception.py` | 把相机、YOLO-World、FastSAM 接到看板用的路由器。令牌要和当时的 `robot/main.py --mode node` 一致 |
 | `dataset/` | 拍照、标注、训练 |
 
-识别框还没有交给抓取技能。物体该放在哪，仍由 `robot/kitchen_scene.py` 的示教关节角决定。
+真机上加 `--yolo` 时，看见的物体优先用这里的识别位置，没看见的仍用 `robot/kitchen_scene.py` 的示教关节角。示教文件里不写识别结果。

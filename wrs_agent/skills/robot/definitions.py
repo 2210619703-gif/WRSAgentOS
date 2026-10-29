@@ -10,7 +10,7 @@ from wrs_agent.skills.contracts import Skill
 
 
 class MoveArgs(Boundary):
-    pose: Literal["home", "B", "C"]
+    pose: Literal["home", "zero", "B", "C"]
 
 
 class RelativeMoveArgs(Boundary):
@@ -32,6 +32,33 @@ class GripperArgs(Boundary):
 
 class PickArgs(Boundary):
     object: Name
+
+
+class ShakeOffArgs(PickArgs):
+    times: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        title="次数",
+        description="左右来回抖几次；物体仍留在夹爪里",
+    )
+
+
+class ShakeOffArgs(PickArgs):
+    times: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        title="次数",
+        description="左右来回抖几次；物体仍留在夹爪里",
+    )
+
+
+class ShakeOffArgs(PickArgs):
+    times: int = Field(
+        default=3, ge=1, le=8, title="次数",
+        description="左右来回抖几次；物体仍留在夹爪里",
+    )
 
 
 class PlaceArgs(PickArgs):
@@ -230,10 +257,11 @@ SKILLS = {
         ),
         _skill(
             "shake_off",
-            PickArgs,
-            "Lift the held strainer and shake it side to side to drain it; it stays held",
+            ShakeOffArgs,
+            "Lift the held strainer and shake it side to side to drain it; it stays held. "
+            "times is how many left-right cycles, default 3",
             preconditions=("object_held",),
-            timeout=20.0,
+            timeout=45.0,
         ),
     )
 }

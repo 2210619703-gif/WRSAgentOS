@@ -100,7 +100,9 @@ class Envelope(Boundary):
 def encode(value: dict | Boundary) -> bytes:
     if isinstance(value, Boundary):
         value = value.model_dump(mode="json")
-    result = json.dumps(value, allow_nan=False, separators=(",", ":")).encode()
+    result = json.dumps(
+        value, allow_nan=False, separators=(",", ":"), ensure_ascii=False,
+    ).encode()
     if len(result) > MAX_BYTES:
         raise ValueError("payload_too_large")
     return result
@@ -221,13 +223,25 @@ class BoxGeometry(Boundary):
     ]
 
 
+class MeshGeometry(Boundary):
+    kind: Literal["mesh"] = "mesh"
+    asset: str = Field(min_length=1, max_length=240, pattern=r"^[A-Za-z0-9_./-]+\.stl$")
+
+    @model_validator(mode="after")
+    def relative_asset(self):
+        if self.asset.startswith("/") or any(p in ("", ".", "..") for p in self.asset.split("/")):
+            raise ValueError("mesh_asset_must_be_relative")
+        return self
+
+
 class ObjectData(Boundary):
     """One identified object; absent pose/geometry means unknown, never identity."""
 
     label: str = Field(default="", max_length=80)
     pos: Vector3 | None = None
     rotmat: Rotation3 | None = None
-    geometry: BoxGeometry | None = None
+    geometry: BoxGeometry | MeshGeometry | None = None
+    alpha: float = Field(default=1.0, ge=0, le=1)
     rgb: Annotated[
         list[Annotated[float, Field(ge=0, le=1)]], Field(min_length=3, max_length=3)
     ] = Field(default_factory=lambda: [0.6, 0.6, 0.6])
@@ -279,15 +293,6 @@ class SpeechData(Boundary):
     last_text: str = Field(default="", max_length=512)
 
 
-class VisionData(Boundary):
-    kind: Literal["vision"] = "vision"
-    completed: Counter = 0
-    result_id: Name | None = None
-    observation_id: Name | None = None
-    count: int = Field(default=0, ge=0, le=32)
-    health: str = Field(default="waiting", max_length=80)
-
-
 class NodeSnapshot(Boundary):
     """One execution node at capture time; never an atomic whole-system view or grant."""
 
@@ -299,7 +304,7 @@ class NodeSnapshot(Boundary):
     admission: Literal["OPEN", "HELD", "UNKNOWN"]
     active_action: Name | None
     stop_confirmed: bool
-    data: Annotated[SceneData | SpeechData | VisionData, Field(discriminator="kind")]
+    data: Annotated[SceneData | SpeechData, Field(discriminator="kind")]
 
 
 class ActionContext(NodeSnapshot):
@@ -326,7 +331,7 @@ class FeatureSnapshot(Boundary):
 
 class NodeInfo(Boundary):
     node_id: Name
-    node_type: Literal["agent", "wrs", "tts", "voice", "asr", "camera", "vision", "ui", "custom"]
+    node_type: Literal["agent", "wrs", "tts", "voice", "asr", "vision", "ui", "custom"]
     target: Name | None = None
     actions: bool = False
     robot_controls: bool = False

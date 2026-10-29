@@ -20,7 +20,7 @@
 
 单独跑时，``WRS_AGENT_TOKEN`` 要和 ``python fafu_real/robot/main.py --mode node`` 那次一致。
 
-这三个节点只发布画面、检测框和掩膜。厨房物体的世界坐标仍来自 ``at_deg``。
+这三个节点只发布画面、检测框和掩膜。真机技能要用自己训练的权重时，走 ``robot/main.py --yolo``（``vision/locate.py``），不走这里的 YOLO-World。
 """
 
 from __future__ import annotations
